@@ -1,12 +1,26 @@
+/**
+ * Structured logging for the Worker.
+ *
+ * Logging is gated on the `ENVIRONMENT` binding only. The Worker runtime has
+ * no `process` global, so consulting `process.env` would throw a
+ * ReferenceError on the first request that reached it. Stack traces are
+ * likewise confined to development so production responses and logs never
+ * carry vault paths or contents.
+ */
+
 export interface LogContext {
   requestId?: string;
   vaultId?: string;
   revision?: number;
 }
 
-export function createLogger(env: { ENVIRONMENT?: string }) {
-  const isDev =
-    env.ENVIRONMENT === 'development' || process.env.NODE_ENV === 'development';
+export interface Logger {
+  info(message: string, ctx?: LogContext): void;
+  error(message: string, ctx?: LogContext, error?: unknown): void;
+}
+
+export function createLogger(env: { ENVIRONMENT?: string }): Logger {
+  const isDev = env.ENVIRONMENT === 'development';
 
   return {
     info: (message: string, ctx?: LogContext) => {
