@@ -43,6 +43,7 @@ describe('snapshotFromLog', () => {
 
   it('rejects a log with a revision gap', () => {
     const result = snapshotFromLog({
+      baseRevision: 0,
       operations: [
         {
           id: 'op-1',
@@ -58,6 +59,7 @@ describe('snapshotFromLog', () => {
 
   it('rejects a log with an invalid operation', () => {
     const result = snapshotFromLog({
+      baseRevision: 0,
       operations: [
         {
           id: 'op-1',
@@ -69,6 +71,24 @@ describe('snapshotFromLog', () => {
       ],
     });
     expect(result).toEqual({ ok: false, error: 'NOTE_NOT_FOUND' });
+  });
+
+  it('refuses to replay a compacted window', () => {
+    // A window starting at a non-zero revision cannot be replayed from the
+    // empty state; doing so would silently discard everything before it.
+    const result = snapshotFromLog({
+      baseRevision: 300,
+      operations: [
+        {
+          id: 'op-1',
+          type: 'create-note',
+          deviceId: 'dev-1',
+          revision: 300,
+          payload: { path: 'notes/late.md', content: 'x' },
+        },
+      ],
+    });
+    expect(result).toEqual({ ok: false, error: 'INCOMPLETE_LOG' });
   });
 });
 

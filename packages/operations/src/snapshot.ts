@@ -8,18 +8,28 @@
 
 import type { OperationError } from './engine.js';
 import { applyOperations } from './engine.js';
-import type { OperationLog } from './log.js';
+import { isCompleteLog, type OperationLog } from './log.js';
 import { createVaultState, type VaultState } from './state.js';
 import { ValidationError, snapshotSchema } from '@thoth/validation';
 
 export type SnapshotResult =
-  { ok: true; state: VaultState } | { ok: false; error: OperationError };
+  | { ok: true; state: VaultState }
+  | { ok: false; error: OperationError | 'INCOMPLETE_LOG' };
 
 /**
  * Replays a log against the empty state. Returns a rejected result if
  * the log contains an invalid operation or a revision gap.
+ *
+ * Only a complete log (`baseRevision === 0`) can be replayed this way: a
+ * compacted window starts at a non-zero revision, and replaying it from the
+ * empty state would silently discard every operation before the window.
+ * Callers must check `isCompleteLog` and treat a windowed log as
+ * unrecoverable rather than rebuilding from it.
  */
 export function snapshotFromLog(log: OperationLog): SnapshotResult {
+  if (!isCompleteLog(log)) {
+    return { ok: false, error: 'INCOMPLETE_LOG' };
+  }
   return applyOperations(createVaultState(), log.operations);
 }
 

@@ -15,8 +15,13 @@ export {
   AppendResult,
   OperationLog,
   appendOperation,
+  createLogWindow,
   createOperationLog,
   deserializeLog,
+  isCompleteLog,
+  logBaseRevision,
+  logContainsRevision,
+  logEndRevision,
   serializeLog,
 } from './log.js';
 export {

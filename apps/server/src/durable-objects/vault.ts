@@ -3,8 +3,11 @@ import type { ValidationIssue } from '@thoth/protocol';
 import {
   appendOperation,
   applyOperations,
+  createLogWindow,
   createOperationLog,
   createVaultState,
+  isCompleteLog,
+  logEndRevision,
   type OperationLog,
   type VaultState,
 } from '@thoth/operations';
@@ -75,6 +78,8 @@ export class VaultDurableObject {
   private readonly IDLE_TIMEOUT_MS = 5 * 60 * 1000;
   private readonly ALARM_INTERVAL_MS = 60 * 1000;
   private readonly SNAPSHOT_COMPACTION_THRESHOLD = 500;
+  /** Operations retained after compaction for lagging clients. */
+  private readonly LOG_WINDOW_SIZE = 200;
   private readonly SNAPSHOT_INTERVAL_MS = 30 * 60 * 1000;
   private readonly MAX_BATCH_SIZE = 100;
 
@@ -423,7 +428,7 @@ export class VaultDurableObject {
     let compactedLog = nextLog;
     // Automatic snapshot compaction
     if (compactedLog.operations.length >= this.SNAPSHOT_COMPACTION_THRESHOLD) {
-      compactedLog = this.compactLog(compactedLog, applied.state);
+      compactedLog = this.compactLog(compactedLog, applied.state.revision);
     }
 
     const updatedMetadata = { ...metadata, lastSyncAt: Date.now() };
@@ -456,6 +461,23 @@ export class VaultDurableObject {
     }
 
     const { sinceRevision } = parsed.value;
+
+    // Compaction drops history that is already folded into the snapshot. A
+    // client asking for a revision below the window cannot be served
+    // incrementally, so it is told to re-bootstrap instead of being handed a
+    // partial operation set that would leave its vault silently inconsistent.
+    if (sinceRevision < data.log.baseRevision) {
+      return json(
+        {
+          error: 'HISTORY_TRUNCATED',
+          message:
+            'requested revision is older than the retained history; re-bootstrap from the snapshot',
+          details: { baseRevision: data.log.baseRevision, revision: data.snapshot.revision },
+        },
+        410
+      );
+    }
+
     const operations = data.log.operations.filter(
       (op) => op.revision >= sinceRevision
     );
@@ -667,9 +689,23 @@ export class VaultDurableObject {
     this.connections.delete(ws);
   }
 
+  /**
+   * Reads the persisted vault, migrating older shapes forward.
+   *
+   * Integrity handling is deliberately conservative: the snapshot is
+   * authoritative and is only ever rebuilt from a log that still holds
+   * complete history. A compacted log is a window, so a revision mismatch
+   * against it is expected rather than a symptom, and replaying it would
+   * silently truncate the vault to the operations that survived
+   * compaction.
+   */
   private async load(): Promise<StoredVault> {
     const stored = await this.state.storage.get<StoredVault>('vault');
     if (stored) {
+      // Migrate logs written before the window offset was tracked.
+      if (stored.log.baseRevision === undefined) {
+        stored.log.baseRevision = 0;
+      }
       // Migrate old snapshots without assets field
       if (!stored.snapshot.assets) {
         (stored.snapshot as VaultState).assets = {};
@@ -677,13 +713,7 @@ export class VaultDurableObject {
       if (!stored.assets) {
         stored.assets = {};
       }
-      // Crash recovery: verify snapshot integrity
-      const expectedRevision =
-        stored.log.operations.length > 0
-          ? stored.log.operations[stored.log.operations.length - 1].revision + 1
-          : 0;
-      if (stored.snapshot.revision !== expectedRevision) {
-        // Attempt recovery by replaying log
+      if (this.isSnapshotBehindLog(stored)) {
         const { snapshotFromLog } = await import('@thoth/operations');
         const recovered = snapshotFromLog(stored.log);
         if (recovered.ok) {
@@ -701,6 +731,18 @@ export class VaultDurableObject {
     };
   }
 
+  /**
+   * True when the log proves the snapshot is stale: the log's window ends
+   * past the snapshot's revision, so operations were acknowledged without
+   * being folded into the snapshot.
+   *
+   * A window that ends at or below the snapshot revision is normal after
+   * compaction and is not treated as corruption.
+   */
+  private isSnapshotBehindLog(data: StoredVault): boolean {
+    return logEndRevision(data.log) > data.snapshot.revision;
+  }
+
   async alarm(): Promise<void> {
     const now = Date.now();
     // Idle timeout handling
@@ -708,7 +750,9 @@ export class VaultDurableObject {
       if (now - meta.lastActive > this.IDLE_TIMEOUT_MS) {
         try {
           ws.close(1000, 'idle timeout');
-        } catch {}
+        } catch {
+          // Socket already closed; the map entry is dropped below either way.
+        }
         this.connections.delete(ws);
       }
     }
@@ -717,22 +761,40 @@ export class VaultDurableObject {
     await this.state.storage.setAlarm(now + this.ALARM_INTERVAL_MS);
   }
 
-  private compactLog(log: OperationLog, snapshotState: { revision: number }) {
-    // Keep only operations after snapshot revision for compaction
-    const cutoff = snapshotState.revision;
-    const remaining = log.operations.filter((op) => op.revision > cutoff);
-    return { operations: remaining };
+  /**
+   * Truncates the log to the newest `LOG_WINDOW_SIZE` operations.
+   *
+   * The snapshot already reflects every applied operation, so compaction
+   * only needs to keep enough recent history for lagging clients to catch
+   * up incrementally. The retained window starts at
+   * `snapshotRevision - retained.length`, which keeps revisions contiguous
+   * and lets `pull` detect — via `log.baseRevision` — that a client has
+   * fallen behind the window and must re-bootstrap from the snapshot.
+   */
+  private compactLog(log: OperationLog, snapshotRevision: number): OperationLog {
+    const retained = log.operations.slice(-this.LOG_WINDOW_SIZE);
+    return createLogWindow(snapshotRevision - retained.length, retained);
   }
 
+  /**
+   * Verifies that the snapshot covers everything the log records, and
+   * reports a mismatch through the audit log.
+   *
+   * This never rewrites the snapshot: recovery happens on read in `load`,
+   * and only for logs that still hold complete history.
+   */
   private async verifySnapshotIntegrity(): Promise<void> {
     const data = await this.load();
     const { snapshot, log } = data;
-    // If log contains operations beyond snapshot, verify by replaying
-    if (log.operations.length === 0) return;
-    const lastLogRevision = log.operations[log.operations.length - 1].revision;
-    if (lastLogRevision <= snapshot.revision) return;
-    // In a full implementation, we'd replay log from snapshot revision.
-    // For now, integrity is assumed if snapshot revision matches expected.
+    if (!this.isSnapshotBehindLog(data)) {
+      return;
+    }
+    await this.audit('integrity-warning', {
+      snapshotRevision: snapshot.revision,
+      logEndRevision: logEndRevision(log),
+      logBaseRevision: log.baseRevision,
+      recoverable: isCompleteLog(log),
+    });
   }
 
   private async save(data: StoredVault): Promise<void> {

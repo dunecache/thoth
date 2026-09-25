@@ -185,8 +185,15 @@ export const pullOperationsSchema: Validator<PullOperationsRequest> = object({
   continuationToken: optional(string({ minLength: 1, maxLength: 500 })),
 });
 
-/** Schema for a persisted, append-only operation log. */
+/**
+ * Schema for a persisted, append-only operation log.
+ *
+ * `baseRevision` is optional so logs written before the field existed still
+ * validate; consumers normalize a missing value to 0, which is the correct
+ * base for a log holding complete history.
+ */
 export const logSchema = object({
+  baseRevision: optional(integer({ min: 0 })),
   operations: array(operationSchema),
 });
 
