@@ -15,6 +15,7 @@ import {
   type Persistence,
 } from './persistence.js';
 import { OperationQueue } from './queue.js';
+import { createApplyGuard } from './apply-guard.js';
 import { attachVaultListener } from './vault-listener.js';
 import {
   DEFAULT_SETTINGS,
@@ -56,6 +57,8 @@ export class ThothPlugin extends Plugin {
   readonly queue = new OperationQueue((queue) => this.saveQueue(queue));
   serverRevision = 0;
   deviceList: Array<{ id: string; createdAt: number; name?: string }> = [];
+  /** Tracks the applier's own vault writes so they are not re-queued. */
+  private readonly applyGuard = createApplyGuard();
   private detachVaultListener?: () => void;
   private scheduler?: RetryScheduler;
   private isSyncing = false;
@@ -158,7 +161,8 @@ export class ThothPlugin extends Plugin {
         queue: this.queue,
         getDeviceId: () => this.settings.deviceId,
         getExtensions: () => this.settings.syncedExtensions,
-        isSyncing: () => this.isSyncing,
+        isAppliedChange: (path, fingerprint) =>
+          this.applyGuard.consume(path, fingerprint),
         onLocalChange: () => {
           if (
             this.settings.serverUrl &&
@@ -573,6 +577,7 @@ export class ThothPlugin extends Plugin {
       return;
     }
     this.isSyncing = true;
+    this.applyGuard.reset();
     this.updateStatusBar();
     let syncSucceeded = false;
     try {
@@ -957,33 +962,40 @@ export class ThothPlugin extends Plugin {
       },
       create: async (path: string, content: string) => {
         await ensureFolders(path);
+        this.applyGuard.recordText(path, content);
         await vault.create(path, content);
       },
       createBinary: async (path: string, data: ArrayBuffer) => {
         await ensureFolders(path);
+        this.applyGuard.recordBinary(path, await hashArrayBuffer(data));
         await vault.createBinary(path, data);
       },
       modify: async (file: { path: string }, content: string) => {
         const f = vault.getAbstractFileByPath(file.path);
         if (f) {
+          this.applyGuard.recordText(file.path, content);
           await vault.modify(f as any, content);
         }
       },
       modifyBinary: async (file: { path: string }, data: ArrayBuffer) => {
         const f = vault.getAbstractFileByPath(file.path);
         if (f) {
+          this.applyGuard.recordBinary(file.path, await hashArrayBuffer(data));
           await vault.modifyBinary(f as any, data);
         }
       },
       rename: async (file: { path: string }, newPath: string) => {
         const f = vault.getAbstractFileByPath(file.path);
         if (f) {
+          this.applyGuard.recordPath(file.path);
+          this.applyGuard.recordPath(newPath);
           await vault.rename(f as any, newPath);
         }
       },
       delete: async (path: string) => {
         const file = vault.getAbstractFileByPath(path);
         if (file) {
+          this.applyGuard.recordPath(path);
           await vault.delete(file);
         }
       },
