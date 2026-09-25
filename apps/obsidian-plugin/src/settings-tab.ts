@@ -162,11 +162,11 @@ export class ThothSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Synced file extensions')
       .setDesc(
-        'Comma-separated extensions synchronized as text files (e.g. md, txt, canvas). Binary assets (png, pdf) use add-asset.'
+        'Comma-separated extensions synchronized as text files (e.g. md, base, canvas). Binary assets (png, pdf) and .base use add-asset.'
       )
       .addText((text) => {
         text
-          .setPlaceholder('md, txt')
+          .setPlaceholder('md, base')
           .setValue(this.plugin.settings.syncedExtensions.join(', '))
           .onChange(async (value: string) => {
             const extensions = value
@@ -176,7 +176,7 @@ export class ThothSettingTab extends PluginSettingTab {
             this.plugin.settings = withSetting(
               this.plugin.settings,
               'syncedExtensions',
-              extensions.length > 0 ? extensions : ['md']
+              extensions.length > 0 ? extensions : ['md', 'base']
             );
             await this.plugin.saveSettings();
           });
@@ -278,14 +278,18 @@ export class ThothSettingTab extends PluginSettingTab {
       }
     }
 
-    // Connection diagnostics & sync statistics
+    // Connection diagnostics & sync statistics — inline, no Notice spam (health cache)
+    const hc = this.plugin.settings.lastHealthCheck;
     new Setting(containerEl)
       .setName('Connection diagnostics')
-      .setDesc('Test connection and view sync statistics')
+      .setDesc(hc ? `${hc.ok ? '✓' : '✗'} ${hc.message} — ${new Date(hc.at).toLocaleString()} (${hc.url || 'no url'})` : 'Test connection and view sync statistics — inline status, not Notices')
       .addButton((btn) =>
         btn
           .setButtonText('Test connection')
-          .onClick(() => void this.plugin.checkConnection())
+          .onClick(async () => {
+            await this.plugin.checkConnection();
+            this.display();
+          })
       );
 
     new Setting(containerEl)

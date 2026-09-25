@@ -108,7 +108,7 @@ describe('loadPluginData', () => {
         deviceId: 'd',
         apiKey: 'k',
         deviceName: '',
-        syncedExtensions: ['md'],
+        syncedExtensions: ['md', 'base'],
         lastVaultIds: [],
         lastHealthCheck: undefined,
       },

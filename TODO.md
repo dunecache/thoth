@@ -444,10 +444,10 @@ Plugin `apps/obsidian-plugin/src`
 [x] `settings-tab.ts:21` replace `Vault ID` TextComponent with stepper S1 Server `[Text][Check]` → `checkHealth` `✓/✗`
 [x] `settings-tab.ts` S2 Vault `[Dropdown recent][Create new vault][Import link/QR]` → `createVault:main.ts:301`
 [x] `settings-tab.ts:42` S3 Device `[Text defaultDeviceName][Register]` → `registerDevice:212` auto `uuidv4`
-[ ] `main.ts:212` `registerDevice` no manual `deviceId` input, trim `deviceName` fallback
-[ ] `main.ts:191` `checkConnection` inline status, no Notice spam
-[ ] `main.ts:355` `updateStatusBar` `● live`/`○ polling`/`not configured` for wizard
-[ ] `main.ts:565` `bootstrapLocalVault` uses recent vaults picker
+[x] `main.ts:212` `registerDevice` no manual `deviceId` input, trim `deviceName` fallback
+[x] `main.ts:191` `checkConnection` inline status, no Notice spam
+[x] `main.ts:355` `updateStatusBar` `● live`/`○ polling`/`not configured` for wizard
+[x] `main.ts:565` `bootstrapLocalVault` uses recent vaults picker
 
 Server `apps/server/src` / `packages/protocol|validation`
 

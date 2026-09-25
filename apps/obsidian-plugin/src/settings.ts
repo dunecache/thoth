@@ -25,7 +25,7 @@ export const DEFAULT_SETTINGS: Readonly<ThothSettings> = {
   deviceId: '',
   apiKey: '',
   deviceName: '',
-  syncedExtensions: ['md'],
+  syncedExtensions: ['md', 'base'],
   lastVaultIds: [],
   lastHealthCheck: undefined,
 };

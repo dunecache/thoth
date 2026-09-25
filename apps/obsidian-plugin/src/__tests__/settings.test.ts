@@ -38,7 +38,7 @@ describe('parseSettings', () => {
   });
 
   it('handles syncedExtensions fallback', () => {
-    expect(parseSettings({ syncedExtensions: [] }).syncedExtensions).toEqual(['md']);
+    expect(parseSettings({ syncedExtensions: [] }).syncedExtensions).toEqual(['md', 'base']);
     expect(parseSettings({ syncedExtensions: ['TXT', '.md', ''] }).syncedExtensions).toEqual(['txt', 'md']);
   });
 });

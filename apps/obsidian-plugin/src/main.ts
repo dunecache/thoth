@@ -223,12 +223,29 @@ export class ThothPlugin extends Plugin {
 
   async checkConnection(): Promise<void> {
     if (!this.settings.serverUrl) {
+      this.settings = withSetting(this.settings, 'lastHealthCheck', {
+        url: '',
+        ok: false,
+        message: 'Configure a server URL first (wizard step 1)',
+        at: Date.now(),
+      });
+      await this.saveSettings();
+      this.updateStatusBar();
       new Notice('Thoth: configure a server URL first');
       return;
     }
 
     const health = await checkHealth(this.settings.serverUrl);
+    this.settings = withSetting(this.settings, 'lastHealthCheck', {
+      url: this.settings.serverUrl,
+      ok: health.ok,
+      message: health.message,
+      at: Date.now(),
+    });
+    await this.saveSettings();
+    this.updateStatusBar();
     if (!health.ok) {
+      console.debug('Thoth: health check failed (inline status)', health.message);
       new Notice(`Thoth: ${health.message}`);
       return;
     }
@@ -239,6 +256,16 @@ export class ThothPlugin extends Plugin {
       deviceId: this.settings.deviceId,
       apiKey: this.settings.apiKey,
     });
+    // inline status for wizard/diagnostics, single Notice (no spam) — settings-tab reads lastHealthCheck
+    this.settings = withSetting(this.settings, 'lastHealthCheck', {
+      url: this.settings.serverUrl,
+      ok: auth.ok,
+      message: auth.message,
+      at: Date.now(),
+    });
+    await this.saveSettings();
+    this.updateStatusBar();
+    console.debug('Thoth: checkConnection', auth.message);
     new Notice(`Thoth: ${auth.message}`);
   }
 
@@ -248,6 +275,7 @@ export class ThothPlugin extends Plugin {
       new Notice('Thoth: server URL and vault ID are required');
       return;
     }
+    // no manual deviceId input — auto uuid, trim name with fallback (AGENTS: wizard S3)
     const name = deviceName.trim() || 'Obsidian Device';
     const deviceId = uuidv4();
     const res = await registerDevice({ serverUrl, vaultId, deviceId, name });
@@ -459,8 +487,24 @@ export class ThothPlugin extends Plugin {
     const { serverUrl, vaultId, deviceId, apiKey } = this.settings;
     const configured = Boolean(serverUrl && vaultId && deviceId && apiKey);
     if (!configured) {
-      this.statusBarEl.textContent = 'Thoth: not configured';
-      this.statusBarEl.title = 'Thoth is not configured';
+      // wizard hints — guide user to the missing step (S1 → S2 → S3)
+      let hint = 'not configured';
+      let title = 'Thoth is not configured — open Settings → Thoth Sync wizard';
+      if (!serverUrl) {
+        hint = 'setup → server';
+        title = 'Thoth wizard: step 1 — set Server URL';
+      } else if (!vaultId) {
+        hint = 'setup → vault';
+        title = 'Thoth wizard: step 2 — pick or create a Vault';
+      } else if (!deviceId || !apiKey) {
+        hint = 'setup → device';
+        title = 'Thoth wizard: step 3 — Register this device';
+      } else if (this.settings.lastHealthCheck && !this.settings.lastHealthCheck.ok) {
+        hint = `✗ ${this.settings.lastHealthCheck.message.slice(0, 24)}`;
+        title = this.settings.lastHealthCheck.message;
+      }
+      this.statusBarEl.textContent = `Thoth: ${hint}`;
+      this.statusBarEl.title = title;
       return;
     }
     if (this.isPaused) {
@@ -734,6 +778,11 @@ export class ThothPlugin extends Plugin {
     if (!this.settings.deviceId) {
       console.debug('Thoth: bootstrap skipped, device not configured');
       return;
+    }
+    // keep recent vaults picker in sync — bootstrap implies this vault is active
+    if (this.settings.vaultId && !this.settings.lastVaultIds.includes(this.settings.vaultId)) {
+      this.settings = pushRecentVaultId(this.settings, this.settings.vaultId);
+      await this.saveSettings();
     }
     const extensions = new Set(this.settings.syncedExtensions.map((e) => e.toLowerCase()));
     const allFiles = this.app.vault.getFiles();
