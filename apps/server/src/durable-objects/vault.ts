@@ -1,5 +1,5 @@
 import type { DurableObjectState } from '@cloudflare/workers-types';
-import type { ValidationIssue } from '@thoth/protocol';
+import type { Operation, ValidationIssue } from '@thoth/protocol';
 import {
   appendOperation,
   applyOperations,
@@ -369,6 +369,18 @@ export class VaultDurableObject {
       }
     }
 
+    // Idempotent replay. A client that pushes, loses the response, and
+    // retries sends the identical batch against the now-stale baseRevision.
+    // Rejecting that wedges the queue forever, so an exact replay is
+    // acknowledged with the revision the operations already produced.
+    if (this.isExactReplay(log, baseRevision, operations)) {
+      return json({
+        revision: snapshot.revision,
+        capabilities: [],
+        replayed: true,
+      });
+    }
+
     if (baseRevision !== snapshot.revision) {
       return json(
         {
@@ -379,7 +391,8 @@ export class VaultDurableObject {
         409
       );
     }
-    // Duplicate operation detection & replay protection
+    // Partial overlap: some operations are already recorded but the batch is
+    // not an exact replay, so the client's queue has diverged from the log.
     const existingIds = new Set(log.operations.map((op) => op.id));
     const duplicateOps = operations.filter((op) => existingIds.has(op.id));
     if (duplicateOps.length > 0) {
@@ -448,6 +461,35 @@ export class VaultDurableObject {
     await this.broadcastVaultChanged(applied.state.revision, pushingDeviceId);
 
     return json({ revision: applied.state.revision, capabilities: [] });
+  }
+
+  /**
+   * True when `operations` is a byte-identical re-send of a contiguous run
+   * of operations already recorded at `baseRevision`.
+   *
+   * Comparing the serialized form is safe because both sides have been
+   * through `operationSchema`, whose `object()` validator rebuilds each
+   * operation with a fixed key order — so equal operations serialize
+   * equally, and a client that reused an id with different content or a
+   * different revision is correctly treated as a conflict.
+   */
+  private isExactReplay(
+    log: OperationLog,
+    baseRevision: number,
+    operations: Operation[]
+  ): boolean {
+    if (operations.length === 0) {
+      return false;
+    }
+    const recorded = new Map(log.operations.map((op) => [op.id, op]));
+    return operations.every((op, index) => {
+      const previous = recorded.get(op.id);
+      return (
+        previous !== undefined &&
+        previous.revision === baseRevision + index &&
+        JSON.stringify(previous) === JSON.stringify(op)
+      );
+    });
   }
 
   private async handlePull(
