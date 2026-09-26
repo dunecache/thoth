@@ -1,14 +1,27 @@
 import { nextBackoffDelay, resetBackoffDelay } from './backoff.js';
 
+/**
+ * What a scheduled run concluded.
+ *
+ * - `success` — progress was made; reset the delay.
+ * - `retry` — transient failure; back off and try again.
+ * - `halt` — retrying cannot help, so stop arming the timer. The scheduler
+ *   stays started, so an explicit `trigger()` still runs the task once more
+ *   once the underlying problem is fixed.
+ * - `skipped` — nothing to do; keep the current delay.
+ *
+ * Omitting the result (or returning `void`) counts as `success`.
+ */
+export type TaskOutcome = 'success' | 'retry' | 'halt' | 'skipped';
+
 export interface RetrySchedulerOptions {
   /**
    * Work to run on every tick.
    *
-   * Returning `false` marks the run as failed and triggers the backoff, so a
-   * task that catches its own errors still participates in it. Throwing has
-   * the same effect. `void` and `true` count as success.
+   * A task that catches its own errors must report them as `retry` to
+   * participate in the backoff; throwing has the same effect.
    */
-  task: () => Promise<boolean | void>;
+  task: () => Promise<TaskOutcome | void>;
   /** Delay between successful ticks. */
   baseIntervalMs?: number;
   /** Upper bound for the backoff delay. */
@@ -122,25 +135,24 @@ export class RetryScheduler {
       return;
     }
     this.running = true;
-    let succeeded = true;
+    let outcome: TaskOutcome = 'success';
     try {
-      const result = await this.options.task();
-      succeeded = result !== false;
-      if (succeeded) {
-        this.delayMs = resetBackoffDelay(this.baseIntervalMs);
-      }
+      outcome = (await this.options.task()) ?? 'success';
     } catch (error) {
-      succeeded = false;
+      outcome = 'retry';
       console.warn('Thoth: retry task failed', error);
     }
-    if (!succeeded) {
-      this.delayMs = nextBackoffDelay(
-        this.delayMs,
-        this.baseIntervalMs,
-        this.options.maxDelayMs ?? 600_000
-      );
-    }
+    this.applyOutcome(outcome);
     this.running = false;
+    // A halt wins over pending. Otherwise a user editing files while their
+    // credential is rejected would set `pending` on every change and the
+    // scheduler would immediately re-run via the zero-delay branch below,
+    // hammering a server that has already refused the request.
+    if (outcome === 'halt') {
+      this.pending = false;
+      this.clearTimer();
+      return;
+    }
     if (this.pending) {
       this.pending = false;
       // Re-run shortly to handle changes that arrived during the run
@@ -148,5 +160,21 @@ export class RetryScheduler {
     } else {
       this.schedule(this.delayMs);
     }
+  }
+
+  private applyOutcome(outcome: TaskOutcome): void {
+    if (outcome === 'success') {
+      this.delayMs = resetBackoffDelay(this.baseIntervalMs);
+      return;
+    }
+    if (outcome === 'retry') {
+      this.delayMs = nextBackoffDelay(
+        this.delayMs,
+        this.baseIntervalMs,
+        this.options.maxDelayMs ?? 600_000
+      );
+    }
+    // `halt` and `skipped` leave the delay untouched: neither should
+    // penalise the interval used once the loop resumes.
   }
 }

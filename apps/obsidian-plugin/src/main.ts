@@ -144,7 +144,9 @@ export class ThothPlugin extends Plugin {
     });
 
     this.scheduler = new RetryScheduler({
-      task: () => this.performSync(),
+      // performSync reports a boolean today; translate it into the outcome
+      // vocabulary so a false result still drives the backoff.
+      task: async () => ((await this.performSync()) ? 'success' : 'retry'),
       baseIntervalMs: 60_000,
       maxDelayMs: 600_000,
     });

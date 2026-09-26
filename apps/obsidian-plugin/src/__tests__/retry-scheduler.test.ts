@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { RetryScheduler } from '../retry-scheduler.js';
+import { RetryScheduler, type TaskOutcome } from '../retry-scheduler.js';
 
 interface FakeTimer {
   id: number;
@@ -9,7 +9,7 @@ interface FakeTimer {
 }
 
 function createScheduler(
-  task: () => Promise<boolean | void>,
+  task: () => Promise<TaskOutcome | void>,
   options: { baseIntervalMs?: number; maxDelayMs?: number } = {}
 ) {
   const timers: FakeTimer[] = [];
@@ -63,7 +63,7 @@ describe('RetryScheduler', () => {
       if (fail) {
         return Promise.reject(new Error('offline'));
       }
-      return Promise.resolve();
+      return Promise.resolve('success' as const);
     });
 
     scheduler.start();
@@ -130,8 +130,10 @@ describe('RetryScheduler', () => {
     scheduler.stop();
   });
 
-  it('backs off when the task reports failure without throwing', async () => {
-    const { scheduler, timers } = createScheduler(() => Promise.resolve(false));
+  it('backs off when the task reports retry without throwing', async () => {
+    const { scheduler, timers } = createScheduler(() =>
+      Promise.resolve('retry')
+    );
 
     scheduler.start();
     fire(timers);
@@ -146,9 +148,9 @@ describe('RetryScheduler', () => {
   });
 
   it('resets the delay after a successful run', async () => {
-    let failing = true;
+    let outcome: TaskOutcome = 'retry';
     const { scheduler, timers } = createScheduler(() =>
-      Promise.resolve(!failing)
+      Promise.resolve(outcome)
     );
 
     scheduler.start();
@@ -156,7 +158,20 @@ describe('RetryScheduler', () => {
     await flush();
     expect(timers[0].delay).toBe(2000);
 
-    failing = false;
+    outcome = 'success';
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(1000);
+
+    scheduler.stop();
+  });
+
+  it('leaves the delay untouched when a run is skipped', async () => {
+    const { scheduler, timers } = createScheduler(() =>
+      Promise.resolve('skipped' as const)
+    );
+
+    scheduler.start();
     fire(timers);
     await flush();
     expect(timers[0].delay).toBe(1000);
@@ -178,7 +193,9 @@ describe('RetryScheduler', () => {
   });
 
   it('does not shorten an in-progress backoff when the interval changes', async () => {
-    const { scheduler, timers } = createScheduler(() => Promise.resolve(false));
+    const { scheduler, timers } = createScheduler(() =>
+      Promise.resolve('retry' as const)
+    );
 
     scheduler.start();
     fire(timers);
@@ -191,6 +208,114 @@ describe('RetryScheduler', () => {
     fire(timers);
     await flush();
     expect(timers[0].delay).toBe(4000);
+
+    scheduler.stop();
+  });
+
+  it('stops arming the timer after a halt', async () => {
+    const { scheduler, timers } = createScheduler(() =>
+      Promise.resolve('halt' as const)
+    );
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+
+    // The run consumed the only timer and nothing replaced it.
+    expect(timers).toHaveLength(0);
+
+    scheduler.stop();
+  });
+
+  it('does not back off when halting', async () => {
+    const { scheduler, timers } = createScheduler(() =>
+      Promise.resolve('halt' as const)
+    );
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+    // A halt is not a transient failure, so the interval used when the loop
+    // resumes must not have been penalised.
+    scheduler.stop();
+    scheduler.start();
+    expect(timers[0].delay).toBe(1000);
+  });
+
+  it('re-runs after a change arrives during a successful run', async () => {
+    // Positive control for the test below: the same mid-run trigger must arm
+    // an immediate re-run when the outcome is not a halt.
+    let runs = 0;
+    let self: RetryScheduler | null = null;
+    const { scheduler, timers } = createScheduler(() => {
+      runs += 1;
+      // Simulates a local change arriving while the run is in flight.
+      if (self) {
+        void self.trigger();
+      }
+      return Promise.resolve('success' as const);
+    });
+    self = scheduler;
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+
+    // The mid-run trigger set `pending`, which arms an immediate follow-up.
+    expect(runs).toBe(1);
+    expect(timers).toHaveLength(1);
+    expect(timers[0].delay).toBe(0);
+
+    scheduler.stop();
+  });
+
+  it('does not re-run when a change arrived during a halted run', async () => {
+    // The regression this guards: a user editing while their credential is
+    // rejected sets `pending`, and the zero-delay branch would re-run
+    // immediately, hammering a server that already refused the request.
+    let runs = 0;
+    let self: RetryScheduler | null = null;
+    const { scheduler, timers } = createScheduler(() => {
+      runs += 1;
+      if (self) {
+        void self.trigger();
+      }
+      return Promise.resolve('halt' as const);
+    });
+    self = scheduler;
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+
+    expect(runs).toBe(1);
+    expect(timers).toHaveLength(0);
+
+    scheduler.stop();
+  });
+
+  it('runs once more after a halt when explicitly triggered', async () => {
+    // Recovery path: re-registering clears the halt, and trigger() must
+    // re-arm the loop even though no timer was pending.
+    let outcome: TaskOutcome = 'halt';
+    let runs = 0;
+    const { scheduler, timers } = createScheduler(() => {
+      runs += 1;
+      return Promise.resolve(outcome);
+    });
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+    expect(runs).toBe(1);
+    expect(timers).toHaveLength(0);
+
+    outcome = 'success';
+    await scheduler.trigger();
+    await flush();
+    expect(runs).toBe(2);
+    expect(timers).toHaveLength(1);
+    expect(timers[0].delay).toBe(1000);
 
     scheduler.stop();
   });
