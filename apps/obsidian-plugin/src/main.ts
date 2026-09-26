@@ -1,5 +1,7 @@
 import { Notice, Plugin } from 'obsidian';
 
+import type { Operation } from '@thoth/protocol';
+
 import {
   checkHealth,
   createVault,
@@ -25,6 +27,7 @@ import {
   withSetting,
 } from './settings.js';
 import { ThothSettingTab } from './settings-tab.js';
+import { confirmAction } from './confirm-modal.js';
 import { uuidv4 } from './uuid.js';
 import {
   uploadOperations,
@@ -405,11 +408,41 @@ export class ThothPlugin extends Plugin {
     this.updateStatusBar();
   }
 
+  /**
+   * Forgets the local revision and queue so the next sync re-bootstraps from
+   * the server snapshot.
+   *
+   * Anything still queued here has never reached the server, so dropping it
+   * discards unsynced edits. The command is kept for recovering a desynced
+   * client, but it now persists the cleared state (otherwise the old queue
+   * reappeared on the next load) and refuses outright when work is pending
+   * unless the user confirms the loss.
+   */
   async resetLocalCache(): Promise<void> {
+    const pending = this.queue.size;
+    if (pending > 0) {
+      const confirmed = await confirmAction(
+        this.app,
+        `Thoth has ${pending} unsynced change${pending === 1 ? '' : 's'} that ` +
+          'have not reached the server. Resetting the local cache discards them.',
+        'Discard and reset'
+      );
+      if (!confirmed) {
+        new Notice('Thoth: local cache unchanged');
+        return;
+      }
+    }
     this.serverRevision = 0;
     this.queue.replaceAll([]);
-    new Notice('Thoth: local cache reset');
+    await this.saveSettings();
+    console.debug('Thoth: local cache reset', { discarded: pending });
+    new Notice(
+      pending > 0
+        ? `Thoth: local cache reset, ${pending} unsynced change(s) discarded`
+        : 'Thoth: local cache reset'
+    );
     this.updateStatusBar();
+    void this.scheduler?.trigger();
   }
 
   async exportSnapshot(): Promise<void> {
@@ -609,46 +642,11 @@ export class ThothPlugin extends Plugin {
       let snapshotAssets: Record<string, SnapshotAsset> = {};
       let haveAuthoritativeSnapshot = false;
       if (this.serverRevision === 0) {
-        const snapshotResult = await downloadSnapshot({
-          serverUrl: this.settings.serverUrl,
-          vaultId: this.settings.vaultId,
-        });
-        if (snapshotResult.ok) {
+        const restored = await this.restoreFromSnapshot(adapter);
+        if (restored) {
           haveAuthoritativeSnapshot = true;
-          snapshotFiles = snapshotResult.files;
-          snapshotAssets = snapshotResult.assets ?? {};
-          await applySnapshotToVault(adapter, snapshotResult.files);
-          // Restore binary assets from snapshot
-          if (snapshotResult.assets) {
-            for (const [path, meta] of Object.entries(snapshotResult.assets)) {
-              const assetRes = await downloadAsset({
-                serverUrl: this.settings.serverUrl,
-                vaultId: this.settings.vaultId,
-                assetId: meta.assetId,
-              });
-              if (assetRes.ok) {
-                const exists = await adapter.exists(path);
-                if (exists) {
-                  await adapter.modifyBinary?.({ path }, assetRes.data);
-                } else {
-                  await adapter.createBinary?.(path, assetRes.data);
-                }
-              } else {
-                console.warn('Thoth: snapshot asset download failed', { path, assetId: meta.assetId });
-              }
-            }
-          }
-          this.serverRevision = snapshotResult.revision;
-          await this.saveSettings();
-          console.debug('Thoth: restored from snapshot', {
-            revision: snapshotResult.revision,
-            files: Object.keys(snapshotResult.files).length,
-            assets: snapshotResult.assets ? Object.keys(snapshotResult.assets).length : 0,
-          });
-        } else {
-          console.warn('Thoth: snapshot restore failed', {
-            error: snapshotResult.error,
-          });
+          snapshotFiles = restored.files;
+          snapshotAssets = restored.assets;
         }
       }
 
@@ -672,6 +670,19 @@ export class ThothPlugin extends Plugin {
             snapshotFiles,
             snapshotAssets,
             haveAuthoritativeSnapshot
+          );
+        }
+      } else if (downloadResult.needsSnapshot) {
+        // The server compacted past this device's revision, so only a full
+        // snapshot can bring it forward. Restoring here avoids re-pulling
+        // the same truncated history on every tick.
+        console.warn('Thoth: history truncated, restoring from snapshot', {
+          error: downloadResult.error,
+        });
+        if (await this.restoreFromSnapshot(adapter)) {
+          syncSucceeded = true;
+          new Notice(
+            'Thoth: local history fell behind the server and was restored from the latest snapshot'
           );
         }
       } else {
@@ -706,46 +717,21 @@ export class ThothPlugin extends Plugin {
           await this.saveSettings();
         }
         const baseRevision = this.serverRevision;
-        const batch = this.queue.all.slice(0, MAX_BATCH_SIZE);
-        // Upload binary assets for add-asset ops before pushing the batch
         const uploadAdapter = this.createVaultAdapter();
-        let assetUploadFailed = false;
-        for (const op of batch) {
-          if (op.type === 'add-asset') {
-            const exists = await uploadAdapter.exists(op.payload.path);
-            if (!exists) {
-              console.warn('Thoth: asset file missing, skipping upload', {
-                path: op.payload.path,
-              });
-              continue;
-            }
-            const data = await uploadAdapter.readBinary?.(op.payload.path);
-            if (!data) {
-              console.warn('Thoth: readBinary unavailable for asset', {
-                path: op.payload.path,
-              });
-              continue;
-            }
-            const res = await uploadAsset({
-              serverUrl: this.settings.serverUrl,
-              vaultId: this.settings.vaultId,
-              assetId: op.payload.assetId,
-              data,
-              mimeType: op.payload.mimeType,
-            });
-            if (!res.ok) {
-              console.warn('Thoth: asset upload failed, will retry', {
-                assetId: op.payload.assetId,
-                error: res.error,
-              });
-              assetUploadFailed = true;
-              break;
-            }
-          }
-        }
-        if (assetUploadFailed) {
+        // Binary blobs must exist on the server before the operations that
+        // reference them are pushed, so assets are uploaded first and any
+        // operation whose blob could not be stored is held back.
+        const prepared = await this.prepareBatchForPush(
+          this.queue.all.slice(0, MAX_BATCH_SIZE),
+          uploadAdapter
+        );
+        if (!prepared.ok) {
+          console.warn('Thoth: batch held back, will retry', {
+            reason: prepared.reason,
+          });
           break;
         }
+        const batch = prepared.operations;
         const uploadResult = await uploadOperations({
           serverUrl: this.settings.serverUrl,
           vaultId: this.settings.vaultId,
@@ -788,6 +774,110 @@ export class ThothPlugin extends Plugin {
       this.updateStatusBar();
       // Provide user feedback only for manual triggers; periodic sync stays silent
     }
+  }
+
+  /**
+   * Uploads the binary blobs a batch references and returns the operations
+   * that are safe to push.
+   *
+   * An `add-asset` whose file is missing locally, unreadable, or too large
+   * to store cannot have its blob uploaded. Pushing it anyway would record
+   * an asset in the server snapshot that no other device can download, so
+   * the whole batch is held back instead: dropping just that operation
+   * would desynchronise the queue positions the server assigns.
+   */
+  private async prepareBatchForPush(
+    batch: readonly Operation[],
+    adapter: VaultAdapter
+  ): Promise<
+    | { ok: true; operations: Operation[] }
+    | { ok: false; reason: 'ASSET_UPLOAD_FAILED' | 'ASSET_UNAVAILABLE'; path?: string }
+  > {
+    for (const op of batch) {
+      if (op.type !== 'add-asset') {
+        continue;
+      }
+      const path = op.payload.path;
+      if (!(await adapter.exists(path))) {
+        console.warn('Thoth: asset file missing, holding back batch', { path });
+        return { ok: false, reason: 'ASSET_UNAVAILABLE', path };
+      }
+      const data = await adapter.readBinary?.(path);
+      if (!data) {
+        console.warn('Thoth: asset unreadable, holding back batch', { path });
+        return { ok: false, reason: 'ASSET_UNAVAILABLE', path };
+      }
+      if (data.byteLength > MAX_ASSET_SIZE) {
+        console.warn('Thoth: asset too large to store, holding back batch', {
+          path,
+          size: data.byteLength,
+        });
+        return { ok: false, reason: 'ASSET_UNAVAILABLE', path };
+      }
+      const res = await uploadAsset({
+        serverUrl: this.settings.serverUrl,
+        vaultId: this.settings.vaultId,
+        assetId: op.payload.assetId,
+        data,
+        mimeType: op.payload.mimeType,
+      });
+      if (!res.ok) {
+        console.warn('Thoth: asset upload failed, holding back batch', {
+          assetId: op.payload.assetId,
+          error: res.error,
+        });
+        return { ok: false, reason: 'ASSET_UPLOAD_FAILED', path };
+      }
+    }
+    return { ok: true, operations: [...batch] };
+  }
+
+  /**
+   * Fetches the server snapshot, writes it to the vault and adopts its
+   * revision.
+   *
+   * Returns null when the snapshot could not be read, so callers can tell
+   * "the server is empty" apart from "the server is unreachable" — the
+   * distinction decides whether local files may be uploaded.
+   */
+  private async restoreFromSnapshot(
+    adapter: VaultAdapter
+  ): Promise<{ files: Record<string, string>; assets: Record<string, SnapshotAsset> } | null> {
+    const { serverUrl, vaultId } = this.settings;
+    if (!serverUrl || !vaultId) {
+      return null;
+    }
+    const snapshotResult = await downloadSnapshot({ serverUrl, vaultId });
+    if (!snapshotResult.ok) {
+      console.warn('Thoth: snapshot restore failed', { error: snapshotResult.error });
+      return null;
+    }
+    const assets = snapshotResult.assets ?? {};
+    await applySnapshotToVault(adapter, snapshotResult.files);
+    for (const [path, meta] of Object.entries(assets)) {
+      const assetRes = await downloadAsset({ serverUrl, vaultId, assetId: meta.assetId });
+      if (!assetRes.ok) {
+        console.warn('Thoth: snapshot asset download failed', {
+          path,
+          assetId: meta.assetId,
+          error: assetRes.error,
+        });
+        continue;
+      }
+      if (await adapter.exists(path)) {
+        await adapter.modifyBinary?.({ path }, assetRes.data);
+      } else {
+        await adapter.createBinary?.(path, assetRes.data);
+      }
+    }
+    this.serverRevision = snapshotResult.revision;
+    await this.saveSettings();
+    console.debug('Thoth: restored from snapshot', {
+      revision: snapshotResult.revision,
+      files: Object.keys(snapshotResult.files).length,
+      assets: Object.keys(assets).length,
+    });
+    return { files: snapshotResult.files, assets };
   }
 
   /**

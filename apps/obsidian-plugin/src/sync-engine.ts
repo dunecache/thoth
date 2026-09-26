@@ -20,7 +20,7 @@ export type UploadResult =
 /** Result of a pull attempt. */
 export type PullResult =
   | { ok: true; revision: number; operations: Operation[] }
-  | { ok: false; error: string };
+  | { ok: false; error: string; needsSnapshot?: boolean };
 
 /**
  * Sends queued operations to the server via PushOperations.
@@ -133,6 +133,14 @@ export async function downloadOperations(params: {
     });
 
     if (!res.ok) {
+      if (res.status === 410) {
+        return {
+          ok: false,
+          error:
+            'server history no longer covers this revision; re-bootstrap from the snapshot',
+          needsSnapshot: true,
+        };
+      }
       return { ok: false, error: `Pull failed with status ${res.status}` };
     }
 
@@ -219,7 +227,8 @@ export async function downloadAsset(params: {
  * Returns the new server revision on success.
  */
 export type DownloadAndApplyResult =
-  { ok: true; newRevision: number } | { ok: false; error: string };
+  | { ok: true; newRevision: number }
+  | { ok: false; error: string; needsSnapshot?: boolean };
 
 export async function downloadAndApply(params: {
   serverUrl: string;
@@ -234,7 +243,11 @@ export async function downloadAndApply(params: {
   });
 
   if (!pull.ok) {
-    return { ok: false, error: pull.error };
+    return {
+      ok: false,
+      error: pull.error,
+      ...(pull.needsSnapshot ? { needsSnapshot: true } : {}),
+    };
   }
 
   // Validate operations from server and ignore malformed ones
