@@ -25,6 +25,12 @@ export interface RealtimeOptions {
   getLocalRevision: () => number;
   requestSync: () => void;
   onStatusChange: (status: RealtimeStatus) => void;
+  /**
+   * Called when the server rejects this device's credential. Realtime cannot
+   * recover on its own — the client holds a revoked key — so the owner is
+   * told, rather than the failure being confined to the console.
+   */
+  onUnauthorized?: (reason: string | undefined) => void;
   webSocketFactory?: (url: string) => WebSocket;
 }
 
@@ -40,6 +46,24 @@ interface InternalState {
 
 function baseUrl(serverUrl: string): string {
   return serverUrl.replace(/\/+$/, '');
+}
+
+/** Best-effort read of the server's error message. */
+async function readMessage(res: Response): Promise<string | undefined> {
+  try {
+    const body = (await res.clone().json()) as unknown;
+    if (
+      typeof body === 'object' &&
+      body !== null &&
+      'message' in body &&
+      typeof body.message === 'string'
+    ) {
+      return body.message;
+    }
+  } catch {
+    // A non-JSON error body carries nothing useful.
+  }
+  return undefined;
 }
 
 /**
@@ -74,7 +98,7 @@ function wsUrlFromHttp(url: string): string {
 
 type TicketResult =
   | { ok: true; ticket: string }
-  | { ok: false; reason: 'unauthorized' | 'network' };
+  | { ok: false; reason: 'unauthorized' | 'network'; detail?: string };
 
 async function fetchTicket(params: {
   serverUrl: string;
@@ -96,8 +120,9 @@ async function fetchTicket(params: {
     );
     if (res.status === 401 || res.status === 403) {
       // Bad or rotated credentials: reconnecting cannot help until the user
-      // re-registers, so stop instead of hammering the server.
-      return { ok: false, reason: 'unauthorized' };
+      // re-registers, so stop instead of hammering the server. The server's
+      // message is carried through so the owner can explain the cause.
+      return { ok: false, reason: 'unauthorized', detail: await readMessage(res) };
     }
     if (!res.ok) {
       // Server reachable but refusing for another reason (rate limit, vault
@@ -123,6 +148,7 @@ export function connectRealtime(options: RealtimeOptions) {
     getLocalRevision,
     requestSync,
     onStatusChange,
+    onUnauthorized,
     webSocketFactory = (url) => new WebSocket(url),
   } = options;
 
@@ -154,10 +180,11 @@ export function connectRealtime(options: RealtimeOptions) {
     const ticket = await fetchTicket({ serverUrl, vaultId, deviceId, apiKey });
     if (!ticket.ok) {
       if (ticket.reason === 'unauthorized') {
-        // Credentials are rejected; only re-registering can fix this, and the
-        // plugin recreates this client when settings change.
+        // The client holds a revoked key, so reconnecting cannot help. Stop
+        // and let the owner surface it, rather than dying silently.
         console.debug('Thoth: realtime ticket rejected, not reconnecting');
         setStatus('closed');
+        onUnauthorized?.(ticket.detail);
         return;
       }
       // A transient failure — offline, DNS, server restart — must not leave

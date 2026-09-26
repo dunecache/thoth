@@ -211,6 +211,15 @@ export class ThothSettingTab extends PluginSettingTab {
             .onClick(() => void this.plugin.checkConnection())
         );
     } else {
+      if (this.plugin.authFailure) {
+        new Setting(containerEl)
+          .setName('3. This device was removed from the vault')
+          .setDesc(
+            `${this.plugin.authFailure.reason}. Sync is paused — register this ` +
+              'device again to resume. Your unsynced changes are kept and will ' +
+              'upload afterwards.'
+          );
+      }
       new Setting(containerEl)
         .setName('3. Device name')
         .setDesc('Human-readable name for this device (auto deviceId)')
@@ -234,7 +243,11 @@ export class ThothSettingTab extends PluginSettingTab {
         .setDesc(hasVault ? 'Ready to register' : 'Select a vault (step 2) first')
         .addButton((btn) =>
           btn
-            .setButtonText('Register this device')
+            .setButtonText(
+              this.plugin.authFailure
+                ? 'Register this device again'
+                : 'Register this device'
+            )
             .setDisabled(!hasVault || !hasServer)
             .onClick(async () => {
               await this.plugin.registerDevice();
@@ -256,9 +269,17 @@ export class ThothSettingTab extends PluginSettingTab {
 
     const list = this.plugin.deviceList ?? [];
     if (list.length === 0) {
+      // An empty list previously covered three different situations, so a
+      // revoked device read as "not loaded yet". Say which one it is.
       new Setting(containerEl)
-        .setName('No devices')
-        .setDesc('Server returned no devices or not loaded yet.');
+        .setName(
+          this.plugin.deviceListError ? 'Could not load devices' : 'No devices'
+        )
+        .setDesc(
+          this.plugin.deviceListError
+            ? `${this.plugin.deviceListError}`
+            : 'No device is registered on this vault yet.'
+        );
     } else {
       for (const d of list) {
         const isCurrent = d.id === deviceId;

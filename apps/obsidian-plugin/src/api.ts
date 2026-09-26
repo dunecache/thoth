@@ -14,7 +14,8 @@ export type RotateResult =
 export type DeviceSummary = { id: string; createdAt: number; name?: string };
 
 export type ListDevicesResult =
-  { ok: true; devices: DeviceSummary[] } | { ok: false; message: string };
+  | { ok: true; devices: DeviceSummary[] }
+  | { ok: false; message: string; unauthorized?: boolean; error?: string };
 
 export type DeleteDeviceResult = { ok: true } | { ok: false; message: string };
 
@@ -208,6 +209,7 @@ export async function listDevices(params: {
       return {
         ok: false,
         message: `List devices failed with status ${res.status}`,
+        ...(res.status === 401 ? { unauthorized: true } : {}),
       };
     }
     const body = (await res.json()) as { devices: DeviceSummary[] };

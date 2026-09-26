@@ -56,6 +56,27 @@ import { connectRealtime, type RealtimeStatus } from './realtime-client.js';
 
 const AUTO_SYNC_DEBOUNCE_MS = 1_500;
 
+/**
+ * A revoked or rejected device credential.
+ *
+ * Deliberately not persisted: it describes a live condition, so it is
+ * re-derived from the next request rather than restored at launch, where it
+ * could outlive the reason for it.
+ */
+export interface AuthFailure {
+  /** The server's explanation, shown verbatim to the user. */
+  reason: string;
+  at: number;
+}
+
+/**
+ * What one sync cycle concluded, in the scheduler's vocabulary.
+ *
+ * `halt` is the important one: a rejected credential cannot be fixed by
+ * retrying, so the loop stops and waits for the user to re-register.
+ */
+type SyncOutcome = 'success' | 'skipped' | 'retry' | 'halt';
+
 // Obsidian loads the plugin entry module and instantiates its default
 // export. The default export is the Obsidian plugin contract; the named
 // export lets other modules import the type without the runtime cycle.
@@ -64,13 +85,32 @@ export class ThothPlugin extends Plugin {
   readonly queue = new OperationQueue((queue) => this.saveQueue(queue));
   serverRevision = 0;
   deviceList: Array<{ id: string; createdAt: number; name?: string }> = [];
+  /**
+   * Why the device list could not be loaded, if it could not be. Without
+   * this an empty list is ambiguous between "no devices" and "the request
+   * failed", which made a revoked device look like a misconfigured one.
+   */
+  deviceListError?: string;
   /** Tracks the applier's own vault writes so they are not re-queued. */
   private readonly applyGuard = createApplyGuard();
+  /**
+   * Set when the server rejects this device's credential. Sync halts while
+   * it is set, and both the status bar and the settings tab surface it, so a
+   * revoked device no longer looks like a healthy idle client.
+   */
+  authFailure?: AuthFailure;
+  /** Guards the one-shot Notice so a halted loop cannot spam the user. */
+  private hasWarnedAboutAuth = false;
   private detachVaultListener?: () => void;
   private scheduler?: RetryScheduler;
   private isSyncing = false;
   private isPaused = false;
   private statusBarEl?: HTMLElement;
+  /** Exposed for tests: the live realtime client, if any. */
+  get activeRealtimeClient(): { close(): void } | undefined {
+    return this.realtimeClient;
+  }
+
   private realtimeClient?: { close(): void };
   private realtimeStatus: RealtimeStatus = 'closed';
 
@@ -108,6 +148,14 @@ export class ThothPlugin extends Plugin {
       name: 'Resume synchronization',
       callback: () => {
         this.resumeSync();
+      },
+    });
+
+    this.addCommand({
+      id: 'thoth-reauthenticate',
+      name: 'Re-authenticate Thoth',
+      callback: () => {
+        void this.reauthenticate();
       },
     });
 
@@ -282,11 +330,19 @@ export class ThothPlugin extends Plugin {
     new Notice(`Thoth: ${auth.message}`);
   }
 
-  async registerDevice(): Promise<void> {
+  /**
+   * Registers this device and stores the issued credential.
+   *
+   * Returns whether registration succeeded. Callers that recover from a
+   * revoked credential must branch on this rather than on whether settings
+   * now hold a key: after a failed attempt the previous, revoked key is
+   * still present, so that check would report success.
+   */
+  async registerDevice(): Promise<boolean> {
     const { serverUrl, vaultId, deviceName } = this.settings;
     if (!serverUrl || !vaultId) {
       new Notice('Thoth: server URL and vault ID are required');
-      return;
+      return false;
     }
     // no manual deviceId input — auto uuid, trim name with fallback (AGENTS: wizard S3)
     const name = deviceName.trim() || 'Obsidian Device';
@@ -294,14 +350,61 @@ export class ThothPlugin extends Plugin {
     const res = await registerDevice({ serverUrl, vaultId, deviceId, name });
     if (!res.ok) {
       new Notice(`Thoth: registration failed – ${res.message}`);
-      return;
+      return false;
     }
     this.settings = withSetting(this.settings, 'deviceId', res.deviceId);
     this.settings = withSetting(this.settings, 'apiKey', res.apiKey);
     this.settings = withSetting(this.settings, 'deviceName', name);
+    // A fresh credential resolves any recorded revocation, whichever entry
+    // point registered: this method, the settings button, or reauthenticate.
+    this.clearAuthFailure();
     await this.saveSettings();
     await this.refreshDeviceList();
     new Notice('Thoth: device registered');
+    return true;
+  }
+
+  /**
+   * Re-registers this device and resumes syncing.
+   *
+   * The recovery path for a revoked credential. Two things it must get right:
+   *
+   * - the realtime client is torn down first. `ensureRealtimeClient` returns
+   *   early when a client already exists, and that client holds the revoked
+   *   key, so without this the WebSocket stays dead and never reconnects
+   *   with the new credential.
+   * - the queue is left untouched. A user reaching this point may be holding
+   *   unsynced edits, and discarding them to fix an auth problem would be a
+   *   far worse outcome than the one being fixed.
+   */
+  async reauthenticate(): Promise<void> {
+    const { serverUrl, vaultId } = this.settings;
+    if (!serverUrl || !vaultId) {
+      new Notice('Thoth: server URL and vault ID are required');
+      return;
+    }
+    const queuedBefore = this.queue.size;
+
+    this.realtimeClient?.close();
+    this.realtimeClient = undefined;
+    this.realtimeStatus = 'closed';
+
+    const registered = await this.registerDevice();
+    if (!registered) {
+      // The previous, revoked credential is still in settings. Resuming on it
+      // would re-enter the retry loop this whole path exists to stop, so the
+      // halt stands.
+      this.updateStatusBar();
+      return;
+    }
+    this.clearAuthFailure();
+    this.updateStatusBar();
+    void this.scheduler?.trigger();
+    new Notice(
+      queuedBefore > 0
+        ? `Thoth: registered again, resuming sync of ${queuedBefore} pending change(s)`
+        : 'Thoth: registered again, resuming sync'
+    );
   }
 
   async rotateApiKey(): Promise<void> {
@@ -377,6 +480,7 @@ export class ThothPlugin extends Plugin {
     const { serverUrl, vaultId } = this.settings;
     if (!serverUrl || !vaultId) {
       this.deviceList = [];
+      this.deviceListError = undefined;
       return;
     }
     const res = await listDevices({
@@ -386,8 +490,15 @@ export class ThothPlugin extends Plugin {
     });
     if (res.ok) {
       this.deviceList = res.devices;
-    } else {
-      this.deviceList = [];
+      this.deviceListError = undefined;
+      return;
+    }
+    this.deviceList = [];
+    this.deviceListError = res.message;
+    if (res.unauthorized) {
+      this.recordAuthFailure(
+        res.error ?? 'this device is no longer registered on the vault'
+      );
     }
   }
 
@@ -618,10 +729,21 @@ export class ThothPlugin extends Plugin {
       this.statusBarEl.title = title;
       return;
     }
-    // A recorded failure is only meaningful once the wizard is finished, so
-    // it is reported here rather than in the not-configured branch — every
-    // one of those settings is present at this point, which made the check
-    // unreachable where it previously sat.
+    // A rejected credential outranks every other state: nothing will sync
+    // until it is fixed, and the pending count below it would otherwise make
+    // a dead client look like a healthy one that is merely behind.
+    if (this.authFailure) {
+      this.statusBarEl.textContent = 'Thoth: ⚠ re-register';
+      this.statusBarEl.title =
+        `${this.authFailure.reason}\n\n` +
+        'Sync is paused until this device is registered again. ' +
+        'Open Settings → Thoth to fix it, or run "Re-authenticate Thoth".';
+      return;
+    }
+    // A recorded health failure is only meaningful once the wizard is
+    // finished, so it is reported here rather than in the not-configured
+    // branch — every one of those settings is present at this point, which
+    // made the check unreachable where it previously sat.
     const health = this.settings.lastHealthCheck;
     if (health && !health.ok) {
       this.statusBarEl.textContent = `Thoth: ✗ ${health.message.slice(0, 24)}`;
@@ -681,6 +803,14 @@ export class ThothPlugin extends Plugin {
         this.realtimeStatus = status;
         this.updateStatusBar();
       },
+      onUnauthorized: (reason) => {
+        // The realtime client discovered the revocation before the next sync
+        // would have; report it through the same state so the status bar and
+        // the one-shot Notice light up immediately.
+        this.recordAuthFailure(
+          reason ?? 'this device is no longer registered on the vault'
+        );
+      },
     });
   }
 
@@ -692,14 +822,49 @@ export class ThothPlugin extends Plugin {
    * being polled at the full interval — previously every error was swallowed
    * here and the backoff never engaged.
    */
-  private async performSync(): Promise<boolean> {
+  /**
+   * Records that the server rejected this device's credential and tells the
+   * user once.
+   *
+   * The Notice fires only on the transition. A halted plugin is skipped
+   * before it reaches the network, so this is normally called once, but the
+   * guard also covers a credential that is rejected by a non-sync path.
+   */
+  private recordAuthFailure(reason: string): void {
+    const first = !this.authFailure;
+    this.authFailure = { reason, at: Date.now() };
+    console.warn('Thoth: credential rejected, halting sync', { reason });
+    if (first && !this.hasWarnedAboutAuth) {
+      this.hasWarnedAboutAuth = true;
+      new Notice(
+        'Thoth: this device is no longer registered on the vault. Open Settings → Thoth to register it again.'
+      );
+    }
+    this.updateStatusBar();
+  }
+
+  /** Clears the revoked-credential state once a valid credential is in use. */
+  private clearAuthFailure(): void {
+    this.authFailure = undefined;
+    this.hasWarnedAboutAuth = false;
+  }
+
+  private async performSync(): Promise<SyncOutcome> {
     if (this.isPaused) {
       console.debug('Thoth: sync paused, skipping');
-      return true;
+      return 'skipped';
     }
     if (this.isSyncing) {
       console.debug('Thoth: sync already in progress, skipping');
-      return true;
+      return 'skipped';
+    }
+    // A rejected credential is not retryable. Skipping before touching the
+    // network keeps a halted plugin from re-authenticating on every tick.
+    if (this.authFailure) {
+      console.debug('Thoth: sync halted, awaiting re-registration', {
+        reason: this.authFailure.reason,
+      });
+      return 'halt';
     }
     this.isSyncing = true;
     this.applyGuard.reset();
@@ -713,7 +878,7 @@ export class ThothPlugin extends Plugin {
         !this.settings.apiKey
       ) {
         console.debug('Thoth: sync skipped, settings incomplete');
-        return true;
+        return 'skipped';
       }
 
       const startedRevision = this.serverRevision;
@@ -763,6 +928,11 @@ export class ThothPlugin extends Plugin {
             haveAuthoritativeSnapshot
           );
         }
+      } else if (downloadResult.unauthorized) {
+        // The credential was rejected. Nothing further in this cycle can
+        // succeed, and retrying will not help, so record it and stop.
+        this.recordAuthFailure(downloadResult.error);
+        return 'halt';
       } else if (downloadResult.needsSnapshot) {
         // The server compacted past this device's revision, so only a full
         // snapshot can bring it forward. Restoring here avoids re-pulling
@@ -793,6 +963,10 @@ export class ThothPlugin extends Plugin {
           apiKey: this.settings.apiKey,
           sinceRevision: this.serverRevision,
         });
+        if (!latest.ok && latest.unauthorized) {
+          this.recordAuthFailure(latest.error);
+          return 'halt';
+        }
         if (latest.ok && latest.revision > this.serverRevision) {
           // Apply any newly pulled operations to the local vault first
           const adapter = this.createVaultAdapter();
@@ -819,6 +993,12 @@ export class ThothPlugin extends Plugin {
           uploadAdapter
         );
         if (!prepared.ok) {
+          if (prepared.unauthorized) {
+            this.recordAuthFailure(
+              prepared.detail ?? 'this device is no longer registered on the vault'
+            );
+            return 'halt';
+          }
           console.warn('Thoth: batch held back, will retry', {
             reason: prepared.reason,
           });
@@ -833,6 +1013,10 @@ export class ThothPlugin extends Plugin {
           operations: batch,
         });
         if (!uploadResult.ok) {
+          if (uploadResult.unauthorized) {
+            this.recordAuthFailure(uploadResult.error);
+            return 'halt';
+          }
           console.warn('Thoth: upload failed, will retry on next sync', {
             error: uploadResult.error,
             baseRevision,
@@ -861,10 +1045,16 @@ export class ThothPlugin extends Plugin {
       }
       // Background asset synchronization
       await this.syncAssets();
-      return syncSucceeded;
+      if (syncSucceeded) {
+        // A completed cycle proves the credential works, so any recorded
+        // revocation is stale.
+        this.clearAuthFailure();
+        return 'success';
+      }
+      return 'retry';
     } catch (error) {
       console.error('Thoth: sync failed with exception', error);
-      return false;
+      return 'retry';
     } finally {
       this.isSyncing = false;
       this.updateStatusBar();
@@ -887,7 +1077,15 @@ export class ThothPlugin extends Plugin {
     adapter: VaultAdapter
   ): Promise<
     | { ok: true; operations: Operation[] }
-    | { ok: false; reason: 'ASSET_UPLOAD_FAILED' | 'ASSET_UNAVAILABLE'; path?: string }
+    | {
+        ok: false;
+        reason: 'ASSET_UPLOAD_FAILED' | 'ASSET_UNAVAILABLE';
+        path?: string;
+        /** Set when the upload was refused rather than unreachable. */
+        unauthorized?: boolean;
+        /** The server's explanation, shown to the user when unauthorized. */
+        detail?: string;
+      }
   > {
     for (const op of batch) {
       if (op.type !== 'add-asset') {
@@ -923,7 +1121,12 @@ export class ThothPlugin extends Plugin {
           assetId: op.payload.assetId,
           error: res.error,
         });
-        return { ok: false, reason: 'ASSET_UPLOAD_FAILED', path };
+        return {
+          ok: false,
+          reason: 'ASSET_UPLOAD_FAILED',
+          path,
+          ...(res.unauthorized ? { unauthorized: true, detail: res.error } : {}),
+        };
       }
     }
     return { ok: true, operations: [...batch] };
