@@ -26,4 +26,24 @@ describe('errors', () => {
     expect(json.error).toBe('INTERNAL_ERROR');
     expect(json.requestId).toBe('abc-123');
   });
+
+  it('does not leak the message of an unexpected error', async () => {
+    const res = handleError(
+      new Error('storage key asset:secret/vault-1 not found'),
+      { requestId: 'abc-123' }
+    );
+    const body = await res.text();
+    // The request id correlates the report with the server logs instead.
+    expect(body).not.toContain('asset:secret');
+    expect(body).not.toContain('not found');
+    expect(body).toContain('abc-123');
+  });
+
+  it('still surfaces the message of an intentional HttpError', async () => {
+    const res = handleError(
+      new HttpError(409, 'REVISION_MISMATCH', 'server is at revision 12')
+    );
+    const json = (await res.json()) as { message: string };
+    expect(json.message).toBe('server is at revision 12');
+  });
 });

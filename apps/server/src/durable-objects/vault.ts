@@ -54,6 +54,29 @@ function assetBlobKey(hash: string): string {
   return `asset-blob:${hash}`;
 }
 
+/** Requests allowed per client IP within one window. */
+const RATE_LIMIT_MAX_REQUESTS = 600;
+const RATE_LIMIT_WINDOW_MS = 60_000;
+/** Distinct client IPs tracked before the in-memory budget is reset. */
+const RATE_LIMIT_MAX_CLIENTS = 1000;
+
+/**
+ * The hibernation WebSocket surface of DurableObjectState.
+ *
+ * Every method is optional because the object may be running without the
+ * WebSocket bindings, which is also the case in tests.
+ */
+interface HibernationState {
+  getWebSockets?(tag?: string): WebSocket[];
+  acceptWebSocket?(ws: WebSocket, tags?: string[]): void;
+  setWebSocketAutoResponse?(options: { request: string; response: string }): void;
+}
+
+/** Response init carrying the client half of an upgraded WebSocket pair. */
+interface UpgradeResponseInit extends ResponseInit {
+  webSocket: WebSocket;
+}
+
 /** Structured 400 error matching the protocol ValidationErrorResponse. */
 function validationErrorResponse(issues: ValidationIssue[]): Response {
   return new Response(
@@ -91,9 +114,15 @@ export class VaultDurableObject {
   private readonly LOG_WINDOW_SIZE = 200;
   private readonly SNAPSHOT_INTERVAL_MS = 30 * 60 * 1000;
   private readonly MAX_BATCH_SIZE = 100;
+  private readonly rateBuckets = new Map<string, { count: number; startedAt: number }>();
 
   constructor(state: DurableObjectState) {
     this.state = state;
+  }
+
+  /** The object's hibernation WebSocket surface, when available. */
+  private get hibernation(): HibernationState {
+    return this.state as unknown as HibernationState;
   }
 
   async fetch(request: Request) {
@@ -105,24 +134,9 @@ export class VaultDurableObject {
       pathname = pathname.slice(3) || '/';
       url.pathname = pathname;
     }
-    // Rate limiting: simple per-IP counter
-    const clientIp = request.headers.get('cf-connecting-ip') ?? 'unknown';
-    const rateKey = `rate:${clientIp}`;
-    const rate = (await this.state.storage.get<{ count: number; ts: number }>(
-      rateKey
-    )) ?? { count: 0, ts: Date.now() };
-    const now = Date.now();
-    if (now - rate.ts > 60_000) {
-      rate.count = 0;
-      rate.ts = now;
-    }
-    rate.count += 1;
-    await this.state.storage.put(rateKey, rate);
-    if (rate.count > 100) {
-      return new Response(JSON.stringify({ error: 'TOO_MANY_REQUESTS' }), {
-        status: 429,
-        headers: { 'Content-Type': 'application/json' },
-      });
+    const rateLimited = await this.checkRateLimit(request);
+    if (rateLimited) {
+      return rateLimited;
     }
 
     let data = await this.load();
@@ -332,6 +346,47 @@ export class VaultDurableObject {
     return json({ error: 'NOT_FOUND' }, 404);
   }
 
+  /**
+   * Per-IP request budget, held in memory.
+   *
+   * The counter used to live in Durable Object storage and was written on
+   * every request, which meant one storage round-trip per asset download and
+   * per WebSocket message. The budget is a soft abuse guard rather than a
+   * correctness mechanism, so an in-memory window is enough: it resets when
+   * the object is evicted, and the state is only consulted for read paths.
+   *
+   * Returns a 429 response when the caller is over budget.
+   */
+  private async checkRateLimit(request: Request): Promise<Response | null> {
+    // The WebSocket handshake is a single request per connection; counting it
+    // against the request budget only penalises clients for reconnecting.
+    if (new URL(request.url).pathname === '/ws') {
+      return null;
+    }
+    const clientIp = request.headers.get('cf-connecting-ip') ?? 'unknown';
+    const now = Date.now();
+    const bucket = this.rateBuckets.get(clientIp);
+    if (!bucket || now - bucket.startedAt > RATE_LIMIT_WINDOW_MS) {
+      this.rateBuckets.set(clientIp, { count: 1, startedAt: now });
+      return null;
+    }
+    bucket.count += 1;
+    if (bucket.count > RATE_LIMIT_MAX_REQUESTS) {
+      return json(
+        {
+          error: 'TOO_MANY_REQUESTS',
+          message: `limit is ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`,
+        },
+        429
+      );
+    }
+    // Keep the map from growing without bound on a shared vault.
+    if (this.rateBuckets.size > RATE_LIMIT_MAX_CLIENTS) {
+      this.rateBuckets.clear();
+    }
+    return null;
+  }
+
   private async handlePush(
     request: Request,
     data: StoredVault
@@ -465,6 +520,14 @@ export class VaultDurableObject {
       revision: applied.state.revision,
       deviceId: operations[0]?.deviceId,
     });
+    // A push is the one path that can leave the log ahead of the snapshot,
+    // so the invariant is re-checked here rather than on a timer.
+    await this.auditSnapshotIntegrity({
+      metadata: updatedMetadata,
+      log: compactedLog,
+      snapshot: applied.state,
+      assets: data.assets,
+    });
     // Notify connected clients about the new revision
     const pushingDeviceId = operations[0]?.deviceId;
     await this.broadcastVaultChanged(applied.state.revision, pushingDeviceId);
@@ -511,7 +574,7 @@ export class VaultDurableObject {
       return validationErrorResponse(parsed.issues);
     }
 
-    const { sinceRevision } = parsed.value;
+    const { sinceRevision, limit } = parsed.value;
 
     // Compaction drops history that is already folded into the snapshot. A
     // client asking for a revision below the window cannot be served
@@ -529,12 +592,19 @@ export class VaultDurableObject {
       );
     }
 
-    const operations = data.log.operations.filter(
+    const available = data.log.operations.filter(
       (op) => op.revision >= sinceRevision
     );
+    // Honour the client's page size so a large window is not sent in one
+    // response. `hasMore` plus `nextRevision` lets the caller page without
+    // having to reason about the log's shape.
+    const page = limit ? available.slice(0, limit) : available;
+    const lastReturned = page[page.length - 1];
     return json({
       revision: data.snapshot.revision,
-      operations,
+      operations: page,
+      hasMore: page.length < available.length,
+      ...(lastReturned ? { nextRevision: lastReturned.revision + 1 } : {}),
     });
   }
 
@@ -674,10 +744,11 @@ export class VaultDurableObject {
   ): Promise<void> {
     try {
       const message = JSON.stringify({ type: 'vault-changed', revision });
-      const allSockets = (this.state as any).getWebSockets?.() ?? [];
+      const allSockets = this.hibernation.getWebSockets?.() ?? [];
+      // Skip the device that caused the change; it already applied it.
       const senderSockets = pushingDeviceId
-        ? new Set((this.state as any).getWebSockets?.(pushingDeviceId) ?? [])
-        : new Set();
+        ? new Set(this.hibernation.getWebSockets?.(pushingDeviceId) ?? [])
+        : new Set<WebSocket>();
       for (const ws of allSockets) {
         if (senderSockets.has(ws)) {
           continue;
@@ -685,11 +756,11 @@ export class VaultDurableObject {
         try {
           ws.send(message);
         } catch {
-          // ignore closed sockets
+          // Socket already closed; nothing to notify.
         }
       }
     } catch {
-      // ignore broadcast errors
+      // A failed notification must not fail the push that triggered it.
     }
   }
 
@@ -723,21 +794,39 @@ export class VaultDurableObject {
     // single-use
     await this.state.storage.delete(`ws-ticket:${ticket}`);
     // Upgrade to WebSocket via hibernation API
-    const pair = new (globalThis as any).WebSocketPair();
-    const [client, server] = Object.values(pair) as [WebSocket, WebSocket];
+    const Pair = (
+      globalThis as unknown as { WebSocketPair?: new () => Record<'0' | '1', WebSocket> }
+    ).WebSocketPair;
+    if (!Pair) {
+      return json(
+        { error: 'WEBSOCKET_UNAVAILABLE', message: 'WebSocketPair is not available' },
+        500
+      );
+    }
+    const pair = new Pair();
+    const client = pair['0'];
+    const server = pair['1'];
+    if (!client || !server) {
+      return json(
+        { error: 'WEBSOCKET_UNAVAILABLE', message: 'WebSocketPair did not yield both sockets' },
+        500
+      );
+    }
     // Tag socket with device id for future filtering/broadcast
-    (this.state as any).acceptWebSocket(server, [deviceId]);
+    this.hibernation.acceptWebSocket?.(server, [deviceId]);
     // Track connection for lifecycle & idle timeout
     this.connections.set(server, { deviceId, lastActive: Date.now() });
-    // Schedule idle check alarm
-    await this.state.storage.put('lastAlarm', Date.now());
+    // Keep the idle-timeout alarm running while sockets are attached
     await this.state.storage.setAlarm(Date.now() + this.ALARM_INTERVAL_MS);
-    // Optional auto-response for ping/pong without waking the DO
-    (this.state as any).setWebSocketAutoResponse?.({
+    // Answer pings without waking the object
+    this.hibernation.setWebSocketAutoResponse?.({
       request: '{"type":"ping"}',
       response: '{"type":"pong"}',
     });
-    return new Response(null, { status: 101, webSocket: client } as any);
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    } as UpgradeResponseInit);
   }
 
   async webSocketMessage(
@@ -833,9 +922,17 @@ export class VaultDurableObject {
     return logEndRevision(data.log) > data.snapshot.revision;
   }
 
+  /**
+   * Closes sockets that have gone idle, then re-arms only if any remain.
+   *
+   * The alarm used to re-arm unconditionally, so a single WebSocket
+   * connection left a vault waking up every 60s for the lifetime of the
+   * deployment even after every client had disconnected. With no sockets
+   * attached there is nothing to time out, so the alarm is left unset and
+   * the next connection re-arms it.
+   */
   async alarm(): Promise<void> {
     const now = Date.now();
-    // Idle timeout handling
     for (const [ws, meta] of this.connections.entries()) {
       if (now - meta.lastActive > this.IDLE_TIMEOUT_MS) {
         try {
@@ -846,9 +943,9 @@ export class VaultDurableObject {
         this.connections.delete(ws);
       }
     }
-    // Automatic snapshot verification
-    await this.verifySnapshotIntegrity();
-    await this.state.storage.setAlarm(now + this.ALARM_INTERVAL_MS);
+    if (this.connections.size > 0) {
+      await this.state.storage.setAlarm(now + this.ALARM_INTERVAL_MS);
+    }
   }
 
   /**
@@ -867,23 +964,21 @@ export class VaultDurableObject {
   }
 
   /**
-   * Verifies that the snapshot covers everything the log records, and
-   * reports a mismatch through the audit log.
+   * Reports a snapshot that the log proves is stale.
    *
-   * This never rewrites the snapshot: recovery happens on read in `load`,
-   * and only for logs that still hold complete history.
+   * This only records the mismatch. Recovery happens on read in `load`, and
+   * only for logs that still hold complete history — a compacted window
+   * legitimately ends below the snapshot revision.
    */
-  private async verifySnapshotIntegrity(): Promise<void> {
-    const data = await this.load();
-    const { snapshot, log } = data;
+  private async auditSnapshotIntegrity(data: StoredVault): Promise<void> {
     if (!this.isSnapshotBehindLog(data)) {
       return;
     }
     await this.audit('integrity-warning', {
-      snapshotRevision: snapshot.revision,
-      logEndRevision: logEndRevision(log),
-      logBaseRevision: log.baseRevision,
-      recoverable: isCompleteLog(log),
+      snapshotRevision: data.snapshot.revision,
+      logEndRevision: logEndRevision(data.log),
+      logBaseRevision: data.log.baseRevision,
+      recoverable: isCompleteLog(data.log),
     });
   }
 

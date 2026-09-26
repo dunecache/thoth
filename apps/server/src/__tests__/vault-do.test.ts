@@ -230,6 +230,8 @@ describe('pull', () => {
     expect(await res.json()).toEqual({
       revision: 2,
       operations: [replaceContent(1, 'notes/a.md', 'edited')],
+      hasMore: false,
+      nextRevision: 2,
     });
   });
 
@@ -240,7 +242,11 @@ describe('pull', () => {
 
     const res = await pull(doObject, 1);
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ revision: 1, operations: [] });
+    expect(await res.json()).toEqual({
+      revision: 1,
+      operations: [],
+      hasMore: false,
+    });
   });
 
   it('rejects malformed request bodies with validation errors', async () => {

@@ -4,6 +4,27 @@ import { handleError } from '../errors/handler.js';
 import { HttpError } from '../errors/http-error.js';
 import type { Env } from '../types/worker.js';
 
+/** Object name backing the vault-index Durable Object. */
+const VAULT_INDEX_NAME = '_vault-index';
+
+/**
+ * The Durable Object binding, narrowed to what the router calls.
+ *
+ * The router works with the platform `Response` while the Durable Object
+ * type declarations bring their own structurally different `Response` and
+ * `Request`. Narrowing to the two members actually used keeps that mismatch
+ * in one documented place instead of casting at every call site.
+ */
+interface VaultBinding {
+  idFromName(name: string): unknown;
+  get(id: unknown): {
+    fetch(request: RequestInfo | URL, init?: RequestInit): Promise<UpgradedResponse>;
+  };
+}
+
+/** A response that may carry the client half of a WebSocket pair. */
+type UpgradedResponse = Response & { webSocket?: WebSocket | null };
+
 export function createRouter(env: Env) {
   const log = createLogger(env);
 
@@ -13,9 +34,11 @@ export function createRouter(env: Env) {
     'Access-Control-Allow-Headers': 'Content-Type, Authorization',
   });
 
-  const addCors = (res: any): Response => {
-    // WebSocket upgrade responses must be returned verbatim – they carry a webSocket handle
-    if (res && (res as any).webSocket) {
+  // An upgraded response carries a `webSocket` handle that only the runtime
+  // can use, so those must be returned verbatim; rebuilding one drops the
+  // handle and the connection never opens.
+  const addCors = (res: UpgradedResponse): UpgradedResponse => {
+    if (res.webSocket) {
       return res;
     }
     const headers = new Headers(res.headers);
@@ -24,11 +47,19 @@ export function createRouter(env: Env) {
       status: res.status,
       statusText: res.statusText,
       headers,
-    }) as unknown as Response;
+    });
   };
 
-  return async (request: Request) => {
-    await Promise.resolve();
+  const binding = env.VAULT_DO as unknown as VaultBinding | undefined;
+
+  const stubFor = (name: string) => {
+    if (!binding) {
+      return null;
+    }
+    return binding.get(binding.idFromName(name));
+  };
+
+  return async (request: Request): Promise<Response> => {
     const requestId = crypto.randomUUID();
     const url = new URL(request.url);
 
@@ -53,9 +84,8 @@ export function createRouter(env: Env) {
       }
 
       if (url.pathname === '/vaults' && request.method === 'GET') {
-        if (env.VAULT_DO) {
-          const indexId = env.VAULT_DO.idFromName('_vault-index');
-          const stub = env.VAULT_DO.get(indexId);
+        const stub = stubFor(VAULT_INDEX_NAME);
+        if (stub) {
           const res = await stub.fetch('https://internal/index/list');
           return addCors(res);
         }
@@ -64,18 +94,16 @@ export function createRouter(env: Env) {
 
       if (url.pathname === '/vaults' && request.method === 'POST') {
         const id = crypto.randomUUID();
-        if (env.VAULT_DO) {
-          const doId = env.VAULT_DO.idFromName(id);
-          const stub = env.VAULT_DO.get(doId);
-          await stub.fetch('https://internal/init', {
+        {
+          const stub = stubFor(id);
+          await stub?.fetch('https://internal/init', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id }),
           });
           // Index for GET /vaults
-          const indexId = env.VAULT_DO.idFromName('_vault-index');
-          const indexStub = env.VAULT_DO.get(indexId);
-          await indexStub.fetch('https://internal/index/add', {
+          const indexStub = stubFor(VAULT_INDEX_NAME);
+          await indexStub?.fetch('https://internal/index/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ id }),
@@ -91,13 +119,20 @@ export function createRouter(env: Env) {
 
       const vaultIdMatch = url.pathname.match(/^\/vaults\/([^/]+)/);
       if (vaultIdMatch) {
-        const vaultId = vaultIdMatch[1];
+        const vaultId = vaultIdMatch[1] ?? '';
+        if (vaultId === VAULT_INDEX_NAME) {
+          // The index object shares the /vaults namespace but is not a
+          // vault. Routing to it would expose the vault list through
+          // metadata and diagnostics, and let DELETE purge the index.
+          return addCors(
+            new Response(JSON.stringify({ error: 'NOT_FOUND' }), { status: 404 })
+          );
+        }
 
         // Vault-level routes
         if (url.pathname === `/vaults/${vaultId}` && request.method === 'GET') {
-          if (env.VAULT_DO) {
-            const doId = env.VAULT_DO.idFromName(vaultId);
-            const stub = env.VAULT_DO.get(doId);
+          const stub = stubFor(vaultId);
+          if (stub) {
             const res = await stub.fetch('https://internal/metadata');
             if (res.ok) return addCors(res);
           }
@@ -113,29 +148,28 @@ export function createRouter(env: Env) {
           url.pathname === `/vaults/${vaultId}` &&
           request.method === 'DELETE'
         ) {
-          if (env.VAULT_DO) {
-            const doId = env.VAULT_DO.idFromName(vaultId);
-            const stub = env.VAULT_DO.get(doId);
-            await stub.fetch('https://internal/purge', { method: 'DELETE' });
-          }
+          const stub = stubFor(vaultId);
+          await stub?.fetch('https://internal/purge', { method: 'DELETE' });
           return addCors(new Response(null, { status: 204 }));
         }
 
         // Operation sync routes
-        const forwardToVault = async (path: string) => {
-          if (!env.VAULT_DO) {
-            return addCors(
-              handleError(
-                new HttpError(
-                  500,
-                  'INTERNAL_ERROR',
-                  'Vault Durable Object binding is not configured'
-                )
+        const noBinding = (): Response =>
+          addCors(
+            handleError(
+              new HttpError(
+                500,
+                'INTERNAL_ERROR',
+                'Vault Durable Object binding is not configured'
               )
-            );
+            )
+          );
+
+        const forwardToVault = async (path: string): Promise<Response> => {
+          const stub = stubFor(vaultId);
+          if (!stub) {
+            return noBinding();
           }
-          const doId = env.VAULT_DO.idFromName(vaultId);
-          const stub = env.VAULT_DO.get(doId);
           const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
           const body = hasBody ? await request.text() : undefined;
           const headers = new Headers({ 'Content-Type': 'application/json' });
@@ -191,24 +225,35 @@ export function createRouter(env: Env) {
               )
             );
           }
-          const doId = env.VAULT_DO.idFromName(vaultId);
-          const stub = env.VAULT_DO.get(doId);
+          const stub = stubFor(vaultId);
+          if (!stub) {
+            return addCors(
+              handleError(
+                new HttpError(
+                  500,
+                  'INTERNAL_ERROR',
+                  'Vault Durable Object binding is not configured'
+                )
+              )
+            );
+          }
           // Pass original request through to preserve Upgrade headers
           const internalUrl = `https://internal/ws${url.search}`;
           const req = new Request(internalUrl, request);
-          const res = await (stub as any).fetch(req);
-          // WebSocket upgrade responses contain a `webSocket` property — don't re-wrap
-          if ((res as any).webSocket) return res;
+          const res = await stub.fetch(req);
+          if (res.webSocket) return res;
           return addCors(res);
         }
 
         // Asset routes — must forward ArrayBuffer, not text
         if (url.pathname.startsWith(`/vaults/${vaultId}/assets`)) {
-          if (!env.VAULT_DO) {
-            return addCors(handleError(new HttpError(500, 'INTERNAL_ERROR', 'Vault Durable Object binding is not configured')));
+          if (!binding) {
+            return noBinding();
           }
-          const doId = env.VAULT_DO.idFromName(vaultId);
-          const stub = env.VAULT_DO.get(doId);
+          const stub = stubFor(vaultId);
+          if (!stub) {
+            return noBinding();
+          }
           const assetPath = url.pathname.replace(`/vaults/${vaultId}`, '');
           const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
           const body = hasBody ? await request.arrayBuffer() : undefined;
@@ -219,23 +264,23 @@ export function createRouter(env: Env) {
 
         // Device routes
         if (url.pathname.startsWith(`/vaults/${vaultId}/devices`)) {
-          if (env.VAULT_DO) {
-            const doId = env.VAULT_DO.idFromName(vaultId);
-            const stub = env.VAULT_DO.get(doId);
+          const deviceStub = stubFor(vaultId);
+          if (deviceStub) {
             const devicePath = url.pathname.replace(`/vaults/${vaultId}`, '');
             const hasBody =
               request.method !== 'GET' && request.method !== 'HEAD';
             const body = hasBody ? await request.text() : undefined;
             const headers = new Headers(request.headers);
             if (hasBody) headers.set('Content-Type', 'application/json');
-            const res = await stub.fetch(`https://internal${devicePath}`, {
+            const res = await deviceStub.fetch(`https://internal${devicePath}`, {
               method: request.method,
               headers,
               body,
             });
             return addCors(res);
           }
-          // Fallback for tests without DO binding
+          // No Durable Object binding: fall through to the in-memory
+          // responses below, which the router tests rely on.
           if (
             url.pathname === `/vaults/${vaultId}/devices` &&
             request.method === 'POST'
@@ -260,13 +305,15 @@ export function createRouter(env: Env) {
               })
             );
           }
-          // Device specific actions fallback
-          const deviceActionMatch = url.pathname.match(
-            new RegExp(`/vaults/${vaultId}/devices/([^/]+)(/.*)?`)
-          );
-          if (deviceActionMatch) {
-            const deviceId = deviceActionMatch[1];
-            const action = deviceActionMatch[2] || '';
+          // Device specific actions fallback. The path is split rather than
+          // matched with a RegExp so a vault id containing regex
+          // metacharacters cannot alter the pattern.
+          const deviceAction = url.pathname
+            .slice(`/vaults/${vaultId}/devices/`.length)
+            .split('/');
+          const deviceId = deviceAction[0];
+          const action = deviceAction.length > 1 ? `/${deviceAction.slice(1).join('/')}` : '';
+          if (deviceId) {
             if (request.method === 'DELETE' && !action) {
               return addCors(new Response(null, { status: 204 }));
             }
