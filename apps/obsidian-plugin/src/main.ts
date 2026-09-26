@@ -1,6 +1,7 @@
-import { Notice, Plugin } from 'obsidian';
+import { Notice, Plugin, type TFile } from 'obsidian';
 
 import type { Operation } from '@thoth/protocol';
+import { snapshotSchema } from '@thoth/validation';
 
 import {
   checkHealth,
@@ -463,14 +464,27 @@ export class ThothPlugin extends Plugin {
     new Notice(`Thoth: snapshot exported to ${path} rev ${snap.revision}`);
   }
 
+  /**
+   * Uploads a `thoth-snapshot.json` to the server, replacing its state.
+   *
+   * This overwrites the server, so it validates the payload locally before
+   * sending and adopts the new revision afterwards. Without adopting it the
+   * device keeps pushing against a stale revision, and its next rescan
+   * reverts the import by uploading the old local content back over it.
+   */
   async importSnapshot(): Promise<void> {
+    const { serverUrl, vaultId } = this.settings;
+    if (!serverUrl || !vaultId) {
+      new Notice('Thoth: configure the server and a vault before importing');
+      return;
+    }
     const path = 'thoth-snapshot.json';
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!file) {
       new Notice('Thoth: thoth-snapshot.json not found in vault root');
       return;
     }
-    const content = await this.app.vault.read(file as any);
+    const content = await this.app.vault.read(file as TFile);
     let parsed: unknown;
     try {
       parsed = JSON.parse(content);
@@ -478,16 +492,42 @@ export class ThothPlugin extends Plugin {
       new Notice('Thoth: snapshot JSON malformed');
       return;
     }
-    const res = await fetch(`${this.settings.serverUrl.replace(/\/+$/, '')}/vaults/${encodeURIComponent(this.settings.vaultId)}/snapshot`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(parsed),
-    });
+    const validated = snapshotSchema(parsed);
+    if (!validated.ok) {
+      new Notice(
+        `Thoth: snapshot is not valid (${validated.issues[0]?.path ?? 'body'}: ${validated.issues[0]?.message ?? 'invalid'})`
+      );
+      return;
+    }
+    const confirmed = await confirmAction(
+      this.app,
+      'Importing replaces the vault on the server with the contents of thoth-snapshot.json. Other devices will receive these files.',
+      'Replace server vault'
+    );
+    if (!confirmed) {
+      new Notice('Thoth: import cancelled');
+      return;
+    }
+
+    const res = await fetch(
+      `${serverUrl.replace(/\/+$/, '')}/vaults/${encodeURIComponent(vaultId)}/snapshot`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(validated.value),
+      }
+    );
     if (!res.ok) {
       new Notice(`Thoth: import failed with status ${res.status}`);
       return;
     }
+    const body = (await res.json().catch(() => null)) as { revision?: number } | null;
+    if (typeof body?.revision === 'number') {
+      this.serverRevision = body.revision;
+      await this.saveSettings();
+    }
     new Notice('Thoth: snapshot imported');
+    void this.scheduler?.trigger();
   }
 
   async syncAssets(): Promise<void> {
@@ -538,12 +578,19 @@ export class ThothPlugin extends Plugin {
       } else if (!deviceId || !apiKey) {
         hint = 'setup → device';
         title = 'Thoth wizard: step 3 — Register this device';
-      } else if (this.settings.lastHealthCheck && !this.settings.lastHealthCheck.ok) {
-        hint = `✗ ${this.settings.lastHealthCheck.message.slice(0, 24)}`;
-        title = this.settings.lastHealthCheck.message;
       }
       this.statusBarEl.textContent = `Thoth: ${hint}`;
       this.statusBarEl.title = title;
+      return;
+    }
+    // A recorded failure is only meaningful once the wizard is finished, so
+    // it is reported here rather than in the not-configured branch — every
+    // one of those settings is present at this point, which made the check
+    // unreachable where it previously sat.
+    const health = this.settings.lastHealthCheck;
+    if (health && !health.ok) {
+      this.statusBarEl.textContent = `Thoth: ✗ ${health.message.slice(0, 24)}`;
+      this.statusBarEl.title = health.message;
       return;
     }
     if (this.isPaused) {
