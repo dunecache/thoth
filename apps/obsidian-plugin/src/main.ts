@@ -16,6 +16,7 @@ import {
 } from './persistence.js';
 import { OperationQueue } from './queue.js';
 import { createApplyGuard } from './apply-guard.js';
+import { planBootstrap, type LocalEntry } from './bootstrap-plan.js';
 import { attachVaultListener } from './vault-listener.js';
 import {
   DEFAULT_SETTINGS,
@@ -33,6 +34,7 @@ import {
   downloadOperations,
   uploadAsset,
   downloadAsset,
+  type SnapshotAsset,
 } from './sync-engine.js';
 import { RetryScheduler } from './retry-scheduler.js';
 import type { VaultAdapter } from './vault-applier.js';
@@ -599,15 +601,22 @@ export class ThothPlugin extends Plugin {
 
       const adapter = this.createVaultAdapter();
 
-      // Restore from snapshot on initial sync before any uploads
+      // Restore from snapshot on initial sync before any uploads. The
+      // snapshot is also the only authoritative view of what the server
+      // holds, so a failed fetch must not be treated as "the server is
+      // empty" further down.
       let snapshotFiles: Record<string, string> = {};
+      let snapshotAssets: Record<string, SnapshotAsset> = {};
+      let haveAuthoritativeSnapshot = false;
       if (this.serverRevision === 0) {
         const snapshotResult = await downloadSnapshot({
           serverUrl: this.settings.serverUrl,
           vaultId: this.settings.vaultId,
         });
         if (snapshotResult.ok) {
+          haveAuthoritativeSnapshot = true;
           snapshotFiles = snapshotResult.files;
+          snapshotAssets = snapshotResult.assets ?? {};
           await applySnapshotToVault(adapter, snapshotResult.files);
           // Restore binary assets from snapshot
           if (snapshotResult.assets) {
@@ -659,7 +668,11 @@ export class ThothPlugin extends Plugin {
         });
         syncSucceeded = true;
         if (startedRevision === 0) {
-          await this.bootstrapLocalVault(snapshotFiles);
+          await this.bootstrapLocalVault(
+            snapshotFiles,
+            snapshotAssets,
+            haveAuthoritativeSnapshot
+          );
         }
       } else {
         console.warn('Thoth: download failed, will retry on next sync', {
@@ -777,11 +790,30 @@ export class ThothPlugin extends Plugin {
     }
   }
 
+  /**
+   * Queues local files the server does not have yet.
+   *
+   * This only runs on a device's first sync, where local and server state
+   * have never been compared. The comparison is delegated to
+   * `planBootstrap`, which refuses to upload anything unless the server
+   * snapshot was actually read.
+   */
   private async bootstrapLocalVault(
-    serverFiles: Record<string, string>
+    serverFiles: Record<string, string>,
+    serverAssets: Record<string, SnapshotAsset>,
+    haveAuthoritativeSnapshot: boolean
   ): Promise<void> {
     if (!this.settings.deviceId) {
       console.debug('Thoth: bootstrap skipped, device not configured');
+      return;
+    }
+    if (!haveAuthoritativeSnapshot) {
+      console.warn(
+        'Thoth: bootstrap skipped — the server snapshot could not be read, so local files cannot be compared against it'
+      );
+      new Notice(
+        'Thoth: could not read the server snapshot, so local files were not uploaded. Use "Rescan vault" once the server is reachable.'
+      );
       return;
     }
     // keep recent vaults picker in sync — bootstrap implies this vault is active
@@ -790,65 +822,63 @@ export class ThothPlugin extends Plugin {
       await this.saveSettings();
     }
     const extensions = new Set(this.settings.syncedExtensions.map((e) => e.toLowerCase()));
-    const allFiles = this.app.vault.getFiles();
-    const syncedFiles = allFiles.filter(
-      (file) => extensions.has(file.extension.toLowerCase())
-    );
-    let enqueued = 0;
+    const syncedFiles = this.app.vault
+      .getFiles()
+      .filter((file) => extensions.has(file.extension.toLowerCase()));
+
+    const localFiles: LocalEntry[] = [];
     for (const file of syncedFiles) {
-      const path = file.path;
-      const serverContent = serverFiles[path];
-      const isBinary = isBinaryPath(path);
-      if (isBinary) {
-        if (serverContent === undefined) {
-          const buffer = await this.app.vault.readBinary(file);
-          if (buffer.byteLength > MAX_ASSET_SIZE) {
-            console.warn('Thoth: asset too large in bootstrap, skipped', { path, size: buffer.byteLength });
-            continue;
-          }
-          const hash = await hashArrayBuffer(buffer);
-          const assetId = assetIdForPath(path);
-          const mimeType = mimeTypeForPath(path);
-          await this.queue.enqueue(
-            {
-              type: 'add-asset',
-              payload: {
-                path,
-                assetId,
-                hash,
-                size: buffer.byteLength,
-                ...(mimeType ? { mimeType } : {}),
-              },
-            },
-            this.settings.deviceId
-          );
-          enqueued++;
-        }
-        // Binary diverging content will be handled via add-asset on next modify
+      if (!isBinaryPath(file.path)) {
+        localFiles.push({
+          kind: 'text',
+          path: file.path,
+          content: await this.app.vault.read(file),
+        });
         continue;
       }
-      const localContent = await this.app.vault.read(file);
-      if (serverContent === undefined) {
-        // Local file not on server → enqueue create
-        await this.queue.enqueue(
-          { type: 'create-note', payload: { path, content: localContent } },
-          this.settings.deviceId
-        );
-        enqueued++;
-      } else if (localContent !== serverContent) {
-        await this.queue.enqueue(
-          {
-            type: 'replace-content',
-            payload: { path, content: localContent },
-          },
-          this.settings.deviceId
-        );
-        enqueued++;
+      const buffer = await this.app.vault.readBinary(file);
+      if (buffer.byteLength > MAX_ASSET_SIZE) {
+        console.warn('Thoth: asset too large in bootstrap, skipped', {
+          path: file.path,
+          size: buffer.byteLength,
+        });
+        localFiles.push({
+          kind: 'skipped',
+          path: file.path,
+          reason: 'too large',
+        });
+        continue;
       }
+      const mimeType = mimeTypeForPath(file.path);
+      localFiles.push({
+        kind: 'binary',
+        path: file.path,
+        hash: await hashArrayBuffer(buffer),
+        size: buffer.byteLength,
+        ...(mimeType ? { mimeType } : {}),
+      });
     }
-    if (enqueued > 0) {
+
+    const plan = planBootstrap({
+      haveAuthoritativeSnapshot,
+      deviceId: this.settings.deviceId,
+      serverFiles,
+      serverAssets,
+      assetIdForPath,
+      localFiles,
+    });
+    if (!plan.ok) {
+      console.debug('Thoth: bootstrap produced no drafts', { reason: plan.reason });
+      return;
+    }
+    for (const draft of plan.drafts) {
+      await this.queue.enqueue(draft, this.settings.deviceId);
+    }
+    if (plan.drafts.length > 0) {
       await this.saveQueue(this.queue);
-      console.debug('Thoth: bootstrapped local vault', { enqueued });
+      console.debug('Thoth: bootstrapped local vault', {
+        enqueued: plan.drafts.length,
+      });
     }
   }
 
