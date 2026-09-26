@@ -168,7 +168,7 @@ describe('push idempotency', () => {
     // revision the retry reported.
     const retryFirst = await push(doObject, {
       baseRevision: 0,
-      operations: [batch[0] as Operation],
+      operations: [batch[0]],
     });
     expect(retryFirst.status).toBe(200);
     const revision = ((await retryFirst.json()) as { revision: number }).revision;

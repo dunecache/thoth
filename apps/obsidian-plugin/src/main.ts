@@ -1,4 +1,4 @@
-import { Notice, Plugin, type TFile } from 'obsidian';
+import { Notice, Plugin, TFile } from 'obsidian';
 
 import type { Operation } from '@thoth/protocol';
 import { snapshotSchema } from '@thoth/validation';
@@ -98,7 +98,7 @@ export class ThothPlugin extends Plugin {
       id: 'thoth-pause-sync',
       name: 'Pause synchronization',
       callback: () => {
-        void this.pauseSync();
+        this.pauseSync();
       },
     });
 
@@ -106,7 +106,7 @@ export class ThothPlugin extends Plugin {
       id: 'thoth-resume-sync',
       name: 'Resume synchronization',
       callback: () => {
-        void this.resumeSync();
+        this.resumeSync();
       },
     });
 
@@ -395,16 +395,16 @@ export class ThothPlugin extends Plugin {
     new Notice('Thoth: sync triggered');
   }
 
-  async pauseSync(): Promise<void> {
+  pauseSync(): void {
     this.isPaused = true;
-    this.scheduler?.stop?.();
+    this.scheduler?.stop();
     new Notice('Thoth: synchronization paused');
     this.updateStatusBar();
   }
 
-  async resumeSync(): Promise<void> {
+  resumeSync(): void {
     this.isPaused = false;
-    this.scheduler?.start?.();
+    this.scheduler?.start();
     new Notice('Thoth: synchronization resumed');
     this.updateStatusBar();
   }
@@ -1106,6 +1106,13 @@ export class ThothPlugin extends Plugin {
 
   private createVaultAdapter(): VaultAdapter {
     const vault = this.app.vault;
+    // Obsidian's read/modify/rename take a TFile, but getAbstractFileByPath
+    // returns a TAbstractFile that may be a folder. Resolving to a TFile here
+    // keeps the cast in one place instead of at every call site.
+    const fileAt = (path: string): TFile | null => {
+      const file = vault.getAbstractFileByPath(path);
+      return file instanceof TFile ? file : null;
+    };
     const ensureFolders = async (path: string): Promise<void> => {
       const parts = path.split('/');
       parts.pop();
@@ -1119,23 +1126,21 @@ export class ThothPlugin extends Plugin {
       }
     };
     return {
-      exists: async (path: string) => {
-        const file = vault.getAbstractFileByPath(path);
-        return file !== null;
-      },
+      exists: (path: string) =>
+        Promise.resolve(vault.getAbstractFileByPath(path) !== null),
       read: async (path: string) => {
-        const file = vault.getAbstractFileByPath(path);
+        const file = fileAt(path);
         if (!file) {
           throw new Error(`File not found: ${path}`);
         }
-        return await vault.read(file as any);
+        return await vault.read(file);
       },
       readBinary: async (path: string) => {
-        const file = vault.getAbstractFileByPath(path);
+        const file = fileAt(path);
         if (!file) {
           throw new Error(`File not found: ${path}`);
         }
-        return await vault.readBinary(file as any);
+        return await vault.readBinary(file);
       },
       create: async (path: string, content: string) => {
         await ensureFolders(path);
@@ -1148,25 +1153,25 @@ export class ThothPlugin extends Plugin {
         await vault.createBinary(path, data);
       },
       modify: async (file: { path: string }, content: string) => {
-        const f = vault.getAbstractFileByPath(file.path);
+        const f = fileAt(file.path);
         if (f) {
           this.applyGuard.recordText(file.path, content);
-          await vault.modify(f as any, content);
+          await vault.modify(f, content);
         }
       },
       modifyBinary: async (file: { path: string }, data: ArrayBuffer) => {
-        const f = vault.getAbstractFileByPath(file.path);
+        const f = fileAt(file.path);
         if (f) {
           this.applyGuard.recordBinary(file.path, await hashArrayBuffer(data));
-          await vault.modifyBinary(f as any, data);
+          await vault.modifyBinary(f, data);
         }
       },
       rename: async (file: { path: string }, newPath: string) => {
-        const f = vault.getAbstractFileByPath(file.path);
+        const f = fileAt(file.path);
         if (f) {
           this.applyGuard.recordPath(file.path);
           this.applyGuard.recordPath(newPath);
-          await vault.rename(f as any, newPath);
+          await vault.rename(f, newPath);
         }
       },
       delete: async (path: string) => {

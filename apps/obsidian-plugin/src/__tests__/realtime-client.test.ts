@@ -54,8 +54,6 @@ function baseOptions(overrides: Record<string, unknown> = {}) {
   };
 }
 
-const flush = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
-
 describe('realtime ticket handling', () => {
   it('retries after a transient network failure instead of giving up', async () => {
     vi.useFakeTimers();
@@ -66,7 +64,7 @@ describe('realtime ticket handling', () => {
         throw new Error('offline');
       }
       return ticketResponse('ticket-1');
-    }) as unknown as typeof fetch;
+    });
 
     const statuses: string[] = [];
     const client = connectRealtime(
@@ -96,7 +94,7 @@ describe('realtime ticket handling', () => {
         return new Response('{}', { status: 429 });
       }
       return ticketResponse('ticket-1');
-    }) as unknown as typeof fetch;
+    });
 
     const client = connectRealtime(baseOptions());
     await vi.advanceTimersByTimeAsync(0);
@@ -112,7 +110,7 @@ describe('realtime ticket handling', () => {
   it('gives up on rejected credentials instead of retrying forever', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => new Response('{}', { status: 401 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
 
     const statuses: string[] = [];
     const client = connectRealtime(
@@ -132,7 +130,7 @@ describe('realtime ticket handling', () => {
   it('gives up on a 403 as well', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => new Response('{}', { status: 403 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    globalThis.fetch = fetchMock;
 
     const client = connectRealtime(baseOptions());
     await vi.advanceTimersByTimeAsync(0);
@@ -144,7 +142,7 @@ describe('realtime ticket handling', () => {
 
   it('does not reconnect after close', async () => {
     vi.useFakeTimers();
-    globalThis.fetch = vi.fn(async () => ticketResponse('t')) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async () => ticketResponse('t'));
 
     const client = connectRealtime(baseOptions());
     await vi.advanceTimersByTimeAsync(0);
@@ -160,13 +158,13 @@ describe('realtime ticket handling', () => {
 describe('realtime notifications', () => {
   it('requests a sync when the server reports a newer revision', async () => {
     vi.useFakeTimers();
-    globalThis.fetch = vi.fn(async () => ticketResponse('t')) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async () => ticketResponse('t'));
 
     const requestSync = vi.fn();
     const client = connectRealtime(baseOptions({ requestSync }));
     await vi.advanceTimersByTimeAsync(0);
 
-    const socket = FakeSocket.instances[0] as FakeSocket;
+    const socket = FakeSocket.instances[0];
     socket.open();
     socket.onmessage?.({
       data: JSON.stringify({ type: 'vault-changed', revision: 5 }),
@@ -180,7 +178,7 @@ describe('realtime notifications', () => {
 
   it('ignores a revision the device already has', async () => {
     vi.useFakeTimers();
-    globalThis.fetch = vi.fn(async () => ticketResponse('t')) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async () => ticketResponse('t'));
 
     const requestSync = vi.fn();
     const client = connectRealtime(
@@ -188,7 +186,7 @@ describe('realtime notifications', () => {
     );
     await vi.advanceTimersByTimeAsync(0);
 
-    const socket = FakeSocket.instances[0] as FakeSocket;
+    const socket = FakeSocket.instances[0];
     socket.open();
     socket.onmessage?.({
       data: JSON.stringify({ type: 'vault-changed', revision: 4 }),
@@ -202,13 +200,13 @@ describe('realtime notifications', () => {
 
   it('debounces a burst of notifications into one sync', async () => {
     vi.useFakeTimers();
-    globalThis.fetch = vi.fn(async () => ticketResponse('t')) as unknown as typeof fetch;
+    globalThis.fetch = vi.fn(async () => ticketResponse('t'));
 
     const requestSync = vi.fn();
     const client = connectRealtime(baseOptions({ requestSync }));
     await vi.advanceTimersByTimeAsync(0);
 
-    const socket = FakeSocket.instances[0] as FakeSocket;
+    const socket = FakeSocket.instances[0];
     socket.open();
     for (const revision of [5, 6, 7]) {
       socket.onmessage?.({

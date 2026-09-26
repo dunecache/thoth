@@ -39,10 +39,16 @@ function isSyncedFile(file: TAbstractFile, extensions: string[]): file is TFile 
   return typeof ext === 'string' && extensions.includes(ext.toLowerCase());
 }
 
+/**
+ * `Vault.readBinary` is checked at runtime because older Obsidian builds
+ * may not expose it, and a vault without it simply cannot sync binaries.
+ */
 function vaultReadBinary(vault: Vault): ((f: TFile) => Promise<ArrayBuffer>) | null {
-  const candidate = (vault as Vault & { readBinary?: (f: TFile) => Promise<ArrayBuffer> })
-    .readBinary;
-  return typeof candidate === 'function' ? candidate.bind(vault) : null;
+  const candidate = (vault as Partial<Vault>).readBinary;
+  if (typeof candidate !== 'function') {
+    return null;
+  }
+  return (file: TFile) => vault.readBinary(file);
 }
 
 /**
@@ -86,7 +92,7 @@ export function attachVaultListener(options: ListenerOptions): () => void {
     }
     const readBinary = vaultReadBinary(vault);
     if (isBinaryPath(file.path) && readBinary) {
-      const buffer = await readBinary(file as TFile);
+      const buffer = await readBinary(file);
       if (buffer.byteLength > MAX_ASSET_SIZE) {
         console.warn('Thoth: asset too large, skipped', {
           path: file.path,
@@ -111,7 +117,7 @@ export function attachVaultListener(options: ListenerOptions): () => void {
       });
       return;
     }
-    const content = await vault.read(file as TFile);
+    const content = await vault.read(file);
     if (options.isAppliedChange?.(file.path, content)) {
       return;
     }

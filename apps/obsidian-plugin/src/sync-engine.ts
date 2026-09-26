@@ -82,7 +82,7 @@ export async function uploadOperations(params: {
       typeof body === 'object' &&
       body !== null &&
       'revision' in body &&
-      typeof (body as { revision: unknown }).revision === 'number'
+      typeof (body).revision === 'number'
     ) {
       return { ok: true, newRevision: (body as { revision: number }).revision };
     }
@@ -195,7 +195,7 @@ export async function uploadAsset(params: {
       typeof body === 'object' &&
       body !== null &&
       'hash' in body &&
-      typeof (body as { hash: unknown }).hash === 'string' &&
+      typeof (body).hash === 'string' &&
       (body as { hash: string }).hash.length > 0
     ) {
       return { ok: true, hash: (body as { hash: string }).hash };

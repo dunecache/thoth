@@ -39,7 +39,7 @@ describe('assets E2E', () => {
     const { doObject } = createDo();
     await initVault(doObject);
     const assetId = encodeURIComponent('img/photo.png');
-    const data = new TextEncoder().encode('pngbytes').buffer as ArrayBuffer;
+    const data = new TextEncoder().encode('pngbytes').buffer;
     const putRes = await doObject.fetch(
       new Request(`https://internal/assets/${assetId}`, {
         method: 'PUT',
@@ -77,7 +77,7 @@ describe('assets E2E', () => {
     const { doObject } = createDo();
     await initVault(doObject);
     const assetId = encodeURIComponent('a.png');
-    const data = new TextEncoder().encode('b').buffer as ArrayBuffer;
+    const data = new TextEncoder().encode('b').buffer;
     await doObject.fetch(new Request(`https://internal/assets/${assetId}`, { method: 'PUT', body: data }));
     const addOp: Operation = {
       id: 'op-1',
@@ -136,7 +136,7 @@ describe('asset deduplication', () => {
       new Request(`https://internal/assets/${encodeURIComponent(path)}`, {
         method: 'PUT',
         headers: { 'Content-Type': mime },
-        body: bytes.buffer as ArrayBuffer,
+        body: bytes.buffer,
       })
     );
     return {
@@ -208,7 +208,7 @@ describe('asset deduplication', () => {
     const res = await doObject.fetch(
       new Request(`https://internal/assets/${encodeURIComponent('img/b.png')}`, {
         method: 'PUT',
-        body: other.buffer as ArrayBuffer,
+        body: other.buffer,
       })
     );
     expect(res.status).toBe(200);

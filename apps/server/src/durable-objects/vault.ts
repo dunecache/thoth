@@ -134,7 +134,7 @@ export class VaultDurableObject {
       pathname = pathname.slice(3) || '/';
       url.pathname = pathname;
     }
-    const rateLimited = await this.checkRateLimit(request);
+    const rateLimited = this.checkRateLimit(request);
     if (rateLimited) {
       return rateLimited;
     }
@@ -203,7 +203,7 @@ export class VaultDurableObject {
       return json({
         revision: data.snapshot.revision,
         files: data.snapshot.files,
-        assets: (data.snapshot as VaultState).assets ?? {},
+        assets: (data.snapshot).assets ?? {},
       });
     }
 
@@ -219,7 +219,7 @@ export class VaultDurableObject {
       if (snapshot.revision < data.snapshot.revision) {
         return json({ error: 'BAD_REQUEST', message: 'snapshot revision cannot go backwards' }, 400);
       }
-      data.snapshot = { revision: snapshot.revision, files: snapshot.files, assets: (snapshot as unknown as VaultState).assets ?? {} } as VaultState;
+      data.snapshot = { revision: snapshot.revision, files: snapshot.files, assets: (snapshot).assets ?? {} };
       await this.save(data);
       return json({ ok: true, revision: data.snapshot.revision });
     }
@@ -237,7 +237,7 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/ws' && method === 'GET') {
-      return this.handleWsUpgrade(request, data);
+      return this.handleWsUpgrade(request);
     }
 
     if (url.pathname === '/push' && method === 'POST') {
@@ -250,7 +250,7 @@ export class VaultDurableObject {
 
     // Device management
     if (url.pathname === '/devices' && method === 'POST') {
-      const body = await request.json().catch(() => null);
+      const body: unknown = await request.json().catch(() => null);
       const parsed = registerDeviceSchema(body);
       if (!parsed.ok) {
         return validationErrorResponse(parsed.issues);
@@ -357,7 +357,7 @@ export class VaultDurableObject {
    *
    * Returns a 429 response when the caller is over budget.
    */
-  private async checkRateLimit(request: Request): Promise<Response | null> {
+  private checkRateLimit(request: Request): Response | null {
     // The WebSocket handshake is a single request per connection; counting it
     // against the request budget only penalises clients for reconnecting.
     if (new URL(request.url).pathname === '/ws') {
@@ -530,7 +530,7 @@ export class VaultDurableObject {
     });
     // Notify connected clients about the new revision
     const pushingDeviceId = operations[0]?.deviceId;
-    await this.broadcastVaultChanged(applied.state.revision, pushingDeviceId);
+    this.broadcastVaultChanged(applied.state.revision, pushingDeviceId);
 
     return json({ revision: applied.state.revision, capabilities: [] });
   }
@@ -706,7 +706,7 @@ export class VaultDurableObject {
     request: Request,
     data: StoredVault
   ): Promise<Response> {
-    const body = await request.json().catch(() => null);
+    const body: unknown = await request.json().catch(() => null);
     const parsed = wsTicketRequestSchema(body);
     if (!parsed.ok) {
       return validationErrorResponse(parsed.issues);
@@ -738,10 +738,7 @@ export class VaultDurableObject {
     return json({ ticket, expiresAt }, 201);
   }
 
-  private async broadcastVaultChanged(
-    revision: number,
-    pushingDeviceId?: string
-  ): Promise<void> {
+  private broadcastVaultChanged(revision: number, pushingDeviceId?: string): void {
     try {
       const message = JSON.stringify({ type: 'vault-changed', revision });
       const allSockets = this.hibernation.getWebSockets?.() ?? [];
@@ -764,10 +761,7 @@ export class VaultDurableObject {
     }
   }
 
-  private async handleWsUpgrade(
-    request: Request,
-    _data: StoredVault
-  ): Promise<Response> {
+  private async handleWsUpgrade(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const deviceId = url.searchParams.get('deviceId') ?? '';
     const ticket = url.searchParams.get('ticket') ?? '';
@@ -829,42 +823,43 @@ export class VaultDurableObject {
     } as UpgradeResponseInit);
   }
 
-  async webSocketMessage(
-    ws: WebSocket,
-    message: string | ArrayBuffer
-  ): Promise<void> {
+  /**
+   * Hibernation message handler. The only valid frame is a ping, which the
+   * runtime answers automatically without waking the object; anything else
+   * is a protocol violation and closes the socket.
+   */
+  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
     const entry = this.connections.get(ws);
     if (entry) {
       entry.lastActive = Date.now();
     }
+    if (!this.isValidClientFrame(message)) {
+      this.closeInvalid(ws);
+    }
+  }
+
+  private isValidClientFrame(message: string | ArrayBuffer): boolean {
     try {
       const text =
         typeof message === 'string'
           ? message
           : new TextDecoder().decode(message);
-      const parsed = JSON.parse(text);
-      const validated = realtimeClientMessageSchema(parsed);
-      if (!validated.ok) {
-        // Invalid client message — close the connection
-        try {
-          ws.close(1008, 'invalid message');
-        } catch {}
-        return;
-      }
-      // ping is auto-responded via setWebSocketAutoResponse; no further action needed
+      const parsed: unknown = JSON.parse(text);
+      return realtimeClientMessageSchema(parsed).ok;
     } catch {
-      try {
-        ws.close(1008, 'invalid message');
-      } catch {}
+      return false;
     }
   }
 
-  async webSocketClose(
-    ws: WebSocket,
-    code: number,
-    reason: string,
-    wasClean: boolean
-  ): Promise<void> {
+  private closeInvalid(ws: WebSocket): void {
+    try {
+      ws.close(1008, 'invalid message');
+    } catch {
+      // Socket already closed; nothing further to do.
+    }
+  }
+
+  webSocketClose(ws: WebSocket): void {
     this.connections.delete(ws);
   }
 
@@ -887,7 +882,7 @@ export class VaultDurableObject {
       }
       // Migrate old snapshots without assets field
       if (!stored.snapshot.assets) {
-        (stored.snapshot as VaultState).assets = {};
+        (stored.snapshot).assets = {};
       }
       if (!stored.assets) {
         stored.assets = {};

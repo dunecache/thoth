@@ -7,6 +7,8 @@
  * Reconnects with exponential backoff + jitter.
  */
 
+import { realtimeServerMessageSchema } from '@thoth/validation';
+
 import { withJitter } from './backoff.js';
 
 const PING_INTERVAL_MS = 30_000;
@@ -37,6 +39,30 @@ interface InternalState {
 
 function baseUrl(serverUrl: string): string {
   return serverUrl.replace(/\/+$/, '');
+}
+
+/**
+ * Validates a server frame, returning the revision it announces.
+ *
+ * Uses the shared schema so the plugin cannot drift from what the server
+ * actually sends, and returns null for anything else rather than trusting
+ * the parsed shape.
+ */
+function parseServerMessage(raw: unknown): { revision: number } | null {
+  if (typeof raw !== 'string') {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const result = realtimeServerMessageSchema(parsed);
+  if (!result.ok || result.value.type !== 'vault-changed') {
+    return null;
+  }
+  return { revision: result.value.revision };
 }
 
 function wsUrlFromHttp(url: string): string {
@@ -155,24 +181,25 @@ export function connectRealtime(options: RealtimeOptions) {
       state.pingTimer = setInterval(() => {
         try {
           ws.send(JSON.stringify({ type: 'ping' }));
-        } catch {}
+        } catch {
+          // Socket closed between the tick firing and the send; onclose
+          // handles the reconnect.
+        }
       }, PING_INTERVAL_MS);
     };
 
     ws.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(typeof ev.data === 'string' ? ev.data : '');
-        if (
-          data?.type === 'vault-changed' &&
-          typeof data.revision === 'number'
-        ) {
-          const local = getLocalRevision();
-          if (data.revision > local && data.revision > state.lastSeenRevision) {
-            state.lastSeenRevision = data.revision;
-            scheduleSync();
-          }
-        }
-      } catch {}
+      const data = parseServerMessage(ev.data);
+      if (!data) {
+        // Unparseable or unknown frame: the server is trusted to send valid
+        // ones, so there is nothing to act on.
+        return;
+      }
+      const local = getLocalRevision();
+      if (data.revision > local && data.revision > state.lastSeenRevision) {
+        state.lastSeenRevision = data.revision;
+        scheduleSync();
+      }
     };
 
     ws.onclose = () => {
@@ -187,7 +214,9 @@ export function connectRealtime(options: RealtimeOptions) {
     ws.onerror = () => {
       try {
         ws.close();
-      } catch {}
+      } catch {
+        // Already closed; onclose has run or is about to.
+      }
     };
   };
 
@@ -211,7 +240,9 @@ export function connectRealtime(options: RealtimeOptions) {
       if (state.debounceTimer) clearTimeout(state.debounceTimer);
       try {
         state.ws?.close();
-      } catch {}
+      } catch {
+        // Already closed.
+      }
       setStatus('closed');
     },
   };

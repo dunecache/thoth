@@ -87,12 +87,12 @@ export function applyOperation(state: VaultState, op: Operation): ApplyResult {
       if (op.payload.oldPath in files) {
         const content = files[op.payload.oldPath];
         delete files[op.payload.oldPath];
-        files[op.payload.newPath] = content as string;
+        files[op.payload.newPath] = content;
       }
       if (op.payload.oldPath in assets) {
         const meta = assets[op.payload.oldPath];
         delete assets[op.payload.oldPath];
-        assets[op.payload.newPath] = meta as typeof assets[string];
+        assets[op.payload.newPath] = meta;
       }
       break;
     }

@@ -48,7 +48,7 @@ export class ThothSettingTab extends PluginSettingTab {
         })
     );
     if (!hasServer && this.plugin.settings.serverUrl) {
-      serverSetting.setDesc(`✗ ${serverValidation.ok ? '' : (serverValidation as { ok: false; error: string }).error}`);
+      serverSetting.setDesc(`✗ ${serverValidation.ok ? '' : (serverValidation).error}`);
     }
 
     // S2 — Vault picker
@@ -128,21 +128,22 @@ export class ThothSettingTab extends PluginSettingTab {
         });
       });
     }
-    // Import link
-    const importSetting = new Setting(containerEl)
+    // Import link. The text component is captured in a local so the button
+    // handler can read it, rather than being stashed on the Setting object.
+    let importField = '';
+    new Setting(containerEl)
       .setName('Import vault link')
       .setDesc('Paste thoth://?serverUrl=https://...&vaultId=... from another device')
       .addText((text) => {
         text.setPlaceholder('thoth://?serverUrl=https://...&vaultId=...');
         text.inputEl.style.minWidth = '260px';
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (importSetting as any)._importText = text;
+        text.onChange((value: string) => {
+          importField = value;
+        });
       })
       .addButton((btn) =>
         btn.setButtonText('Import').onClick(async () => {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const txt = (importSetting as any)._importText as TextComponent;
-          const link = txt.getValue();
+          const link = importField.trim();
           const parsed = parseImportVaultLink(link);
           if (!parsed) {
             new Notice('✗ Invalid thoth:// link');
@@ -306,7 +307,7 @@ export class ThothSettingTab extends PluginSettingTab {
   ): void {
     text
       .setPlaceholder(placeholder)
-      .setValue(this.plugin.settings[key] as string)
+      .setValue(this.plugin.settings[key])
       .onChange(async (value: string) => {
         this.plugin.settings = withSetting(this.plugin.settings, key, value);
         await this.plugin.saveSettings();

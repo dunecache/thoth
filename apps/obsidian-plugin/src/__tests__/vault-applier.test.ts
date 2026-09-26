@@ -58,7 +58,7 @@ function op(overrides: Partial<Operation> & { type: Operation['type']; payload: 
     deviceId: 'dev-1',
     revision: 0,
     ...overrides,
-  } as Operation;
+  };
 }
 
 describe('isBinaryPath', () => {
@@ -72,7 +72,7 @@ describe('isBinaryPath', () => {
 
 describe('base64 round-trip', () => {
   it('encodes and decodes', () => {
-    const buf = new TextEncoder().encode('hello binary \x00\x01').buffer as ArrayBuffer;
+    const buf = new TextEncoder().encode('hello binary \x00\x01').buffer;
     const b64 = arrayBufferToBase64(buf);
     const out = base64ToArrayBuffer(b64);
     expect(new Uint8Array(out)).toEqual(new Uint8Array(buf));
@@ -88,7 +88,7 @@ describe('applyOperationToVault', () => {
 
   it('creates binary via base64 fallback', async () => {
     const v = new MemVault();
-    const buf = new TextEncoder().encode('pngdata').buffer as ArrayBuffer;
+    const buf = new TextEncoder().encode('pngdata').buffer;
     const b64 = arrayBufferToBase64(buf);
     await applyOperationToVault(v, op({ type: 'create-note', payload: { path: 'img.png', content: b64 } }));
     expect(new Uint8Array(v.binaries.get('img.png') as ArrayBuffer)).toEqual(new Uint8Array(buf));
@@ -96,7 +96,7 @@ describe('applyOperationToVault', () => {
 
   it('applies add-asset with fetchAsset', async () => {
     const v = new MemVault();
-    const buf = new TextEncoder().encode('asset bytes').buffer as ArrayBuffer;
+    const buf = new TextEncoder().encode('asset bytes').buffer;
     const fetchAsset = async () => buf;
     await applyOperationToVault(
       v,
@@ -124,7 +124,7 @@ describe('applyOperationToVault', () => {
 describe('applySnapshotToVault', () => {
   it('writes text and binary', async () => {
     const v = new MemVault();
-    const buf = new TextEncoder().encode('snap').buffer as ArrayBuffer;
+    const buf = new TextEncoder().encode('snap').buffer;
     const b64 = arrayBufferToBase64(buf);
     await applySnapshotToVault(v, { 'a.md': 'hello', 'img.png': b64 });
     expect(v.files.get('a.md')).toBe('hello');

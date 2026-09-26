@@ -14,6 +14,8 @@ import type {
   OperationType,
   PullOperationsRequest,
   PushOperationsRequest,
+  RealtimeClientMessage,
+  RealtimeServerMessage,
   RegisterDeviceRequest,
   RenameNoteOperation,
   ReplaceContentOperation,
@@ -230,7 +232,9 @@ export const wsTicketResponseSchema: Validator<{
 });
 
 /** Schema for server→client realtime messages. */
-export const realtimeServerMessageSchema = (value: unknown) => {
+export const realtimeServerMessageSchema: Validator<RealtimeServerMessage> = (
+  value
+) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { ok: false, issues: [{ path: '', message: 'expected an object' }] };
   }
@@ -247,7 +251,12 @@ export const realtimeServerMessageSchema = (value: unknown) => {
         })),
       };
     }
-    return { ok: true, value: { type, revision: revisionResult.value } };
+    for (const k of Object.keys(record)) {
+      if (k !== 'type' && k !== 'revision') {
+        return { ok: false, issues: [{ path: k, message: 'unexpected key' }] };
+      }
+    }
+    return { ok: true, value: { type: 'vault-changed', revision: revisionResult.value } };
   }
   if (type === 'pong') {
     for (const k of Object.keys(record)) {
@@ -255,7 +264,7 @@ export const realtimeServerMessageSchema = (value: unknown) => {
         return { ok: false, issues: [{ path: k, message: 'unexpected key' }] };
       }
     }
-    return { ok: true, value: { type } };
+    return { ok: true, value: { type: 'pong' } };
   }
   return {
     ok: false,
@@ -264,7 +273,9 @@ export const realtimeServerMessageSchema = (value: unknown) => {
 };
 
 /** Schema for client→server realtime messages. */
-export const realtimeClientMessageSchema = (value: unknown) => {
+export const realtimeClientMessageSchema: Validator<RealtimeClientMessage> = (
+  value
+) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return { ok: false, issues: [{ path: '', message: 'expected an object' }] };
   }
