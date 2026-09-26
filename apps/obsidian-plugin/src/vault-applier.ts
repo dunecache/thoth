@@ -1,4 +1,4 @@
-import type { Operation } from '@thoth/protocol';
+import { MAX_ASSET_BYTES, type Operation } from '@thoth/protocol';
 
 /**
  * Minimal vault adapter required to apply operations.
@@ -111,7 +111,13 @@ export function assetIdForPath(path: string): string {
   return encodeURIComponent(path);
 }
 
-export const MAX_ASSET_SIZE = 10 * 1024 * 1024; // 10MB Free tier guard
+/**
+ * Largest asset the server will store.
+ *
+ * Sourced from the shared protocol so the plugin never queues a file the
+ * server is guaranteed to reject.
+ */
+export const MAX_ASSET_SIZE = MAX_ASSET_BYTES;
 
 export async function hashArrayBuffer(buffer: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', buffer);

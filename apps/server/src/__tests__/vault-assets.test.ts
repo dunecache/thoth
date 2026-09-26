@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { DurableObjectState } from '@cloudflare/workers-types';
-import type { Operation } from '@thoth/protocol';
+import { MAX_ASSET_BYTES, type Operation } from '@thoth/protocol';
 
 import { VaultDurableObject } from '../durable-objects/vault.js';
 
@@ -121,5 +121,131 @@ describe('assets E2E', () => {
     expect(res.status).toBe(409);
     const body = (await res.json()) as { details: { reason: string } };
     expect(body.details.reason).toBe('NOTE_NOT_FOUND');
+  });
+});
+
+describe('asset deduplication', () => {
+  const bytes = new TextEncoder().encode('identical bytes');
+
+  async function put(
+    doObject: VaultDurableObject,
+    path: string,
+    mime = 'application/octet-stream'
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    const res = await doObject.fetch(
+      new Request(`https://internal/assets/${encodeURIComponent(path)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': mime },
+        body: bytes.buffer as ArrayBuffer,
+      })
+    );
+    return {
+      status: res.status,
+      body: (await res.json()) as Record<string, unknown>,
+    };
+  }
+
+  it('serves a deduplicated asset under the id the client asked for', async () => {
+    const { doObject } = createDo();
+    await initVault(doObject);
+
+    const first = await put(doObject, 'img/a.png');
+    expect(first.status).toBe(200);
+    const firstId = encodeURIComponent('img/a.png');
+
+    // Same bytes uploaded under a different path.
+    const second = await put(doObject, 'img/copy.png');
+    expect(second.status).toBe(200);
+    const secondId = encodeURIComponent('img/copy.png');
+
+    // The server reports the duplicate, but must answer with the id the
+    // client's add-asset operation references.
+    expect(second.body.duplicate).toBe(true);
+    expect(second.body.assetId).toBe(secondId);
+    expect(second.body.canonicalAssetId).toBe(firstId);
+
+    // The regression: the requested id was never registered, so every other
+    // device got a 404 for an asset the snapshot pointed at.
+    const res = await doObject.fetch(
+      new Request(`https://internal/assets/${secondId}`)
+    );
+    expect(res.status).toBe(200);
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(bytes);
+  });
+
+  it('shares one stored blob between duplicate ids', async () => {
+    const { doObject, storage } = createDo();
+    await initVault(doObject);
+
+    await put(doObject, 'img/a.png');
+    const afterFirst = [...storage.list({ prefix: 'asset-blob:' }).keys()];
+    await put(doObject, 'img/copy.png');
+    const afterSecond = [...storage.list({ prefix: 'asset-blob:' }).keys()];
+
+    // Content-addressed storage means the duplicate costs no extra bytes.
+    expect(afterSecond).toEqual(afterFirst);
+    expect(afterFirst).toHaveLength(1);
+  });
+
+  it('keeps the requesting mime type on the alias', async () => {
+    const { doObject } = createDo();
+    await initVault(doObject);
+    await put(doObject, 'img/a.bin', 'application/octet-stream');
+    await put(doObject, 'img/a.png', 'image/png');
+
+    const res = await doObject.fetch(
+      new Request(`https://internal/assets/${encodeURIComponent('img/a.png')}`)
+    );
+    expect(res.headers.get('Content-Type')).toBe('image/png');
+  });
+
+  it('stores distinct content separately', async () => {
+    const { doObject } = createDo();
+    await initVault(doObject);
+    await put(doObject, 'img/a.png');
+
+    const other = new TextEncoder().encode('different bytes');
+    const res = await doObject.fetch(
+      new Request(`https://internal/assets/${encodeURIComponent('img/b.png')}`, {
+        method: 'PUT',
+        body: other.buffer as ArrayBuffer,
+      })
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json() as { duplicate?: boolean }).duplicate).toBeUndefined();
+  });
+});
+
+describe('asset size limit', () => {
+  it('rejects a blob above the shared limit with a clear status', async () => {
+    const { doObject, storage } = createDo();
+    await initVault(doObject);
+
+    const oversized = new ArrayBuffer(MAX_ASSET_BYTES + 1);
+    const res = await doObject.fetch(
+      new Request('https://internal/assets/big.bin', {
+        method: 'PUT',
+        body: oversized,
+      })
+    );
+
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe('ASSET_TOO_LARGE');
+    // Nothing was written, so the plugin does not retry forever.
+    expect([...storage.list({ prefix: 'asset-blob:' }).keys()]).toHaveLength(0);
+  });
+
+  it('accepts a blob at the limit', async () => {
+    const { doObject } = createDo();
+    await initVault(doObject);
+
+    const res = await doObject.fetch(
+      new Request('https://internal/assets/at-limit.bin', {
+        method: 'PUT',
+        body: new ArrayBuffer(MAX_ASSET_BYTES),
+      })
+    );
+    expect(res.status).toBe(200);
   });
 });

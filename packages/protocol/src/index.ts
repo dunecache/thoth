@@ -7,6 +7,7 @@
 export {
   AssetId,
   DeviceId,
+  MAX_ASSET_BYTES,
   OperationId,
   OperationMetadata,
   ProtocolCapability,

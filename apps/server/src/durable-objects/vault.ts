@@ -1,5 +1,9 @@
 import type { DurableObjectState } from '@cloudflare/workers-types';
-import type { Operation, ValidationIssue } from '@thoth/protocol';
+import {
+  MAX_ASSET_BYTES,
+  type Operation,
+  type ValidationIssue,
+} from '@thoth/protocol';
 import {
   appendOperation,
   applyOperations,
@@ -43,6 +47,11 @@ interface StoredVault {
   log: OperationLog;
   snapshot: VaultState;
   assets: Record<string, AssetMetadata>;
+}
+
+/** Storage key for a content-addressed asset blob. */
+function assetBlobKey(hash: string): string {
+  return `asset-blob:${hash}`;
 }
 
 /** Structured 400 error matching the protocol ValidationErrorResponse. */
@@ -529,6 +538,16 @@ export class VaultDurableObject {
     });
   }
 
+  /**
+   * Stores an uploaded asset blob.
+   *
+   * Blobs are content-addressed by hash so two paths holding identical bytes
+   * share one stored copy. The requested asset id is always registered in
+   * the asset registry, including when its bytes are already present under
+   * another id: the `add-asset` operation the client pushes references the
+   * id it chose, so leaving it unregistered makes that operation's snapshot
+   * entry undownloadable for every other device.
+   */
   private async handleAssetUpload(
     request: Request,
     data: StoredVault
@@ -539,23 +558,48 @@ export class VaultDurableObject {
     if (!assetId) {
       return json({ error: 'BAD_REQUEST', message: 'missing assetId' }, 400);
     }
-    const body = await request.arrayBuffer();
-    const size = body.byteLength;
-    // Simple hash for verification – SHA-256 hex
-    const hashBuffer = await crypto.subtle.digest('SHA-256', body);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    const hash = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
     const mimeType =
       request.headers.get('content-type') ?? 'application/octet-stream';
-    // Duplicate detection by hash
-    const existingId = Object.entries(data.assets).find(
-      ([, meta]) => meta.hash === hash
-    )?.[0];
-    if (existingId && existingId !== assetId) {
-      // Duplicate asset already stored, reuse metadata
-      return json({ assetId: existingId, hash, size, duplicate: true });
+    const body = await request.arrayBuffer();
+    const size = body.byteLength;
+    // A Durable Object storage entry caps key and value at 2 MB combined;
+    // reject early with a clear status instead of an opaque storage failure.
+    if (size > MAX_ASSET_BYTES) {
+      return json(
+        {
+          error: 'ASSET_TOO_LARGE',
+          message: `asset is ${size} bytes, limit is ${MAX_ASSET_BYTES}`,
+        },
+        413
+      );
     }
-    await this.state.storage.put(`asset:${assetId}`, body);
+    const hash = await this.hashBytes(body);
+
+    const existingId = Object.keys(data.assets).find(
+      (id) => data.assets[id]?.hash === hash
+    );
+    if (existingId && existingId !== assetId) {
+      const existing = data.assets[existingId];
+      if (existing) {
+        // Register the requested id as an alias over the shared blob.
+        data.assets[assetId] = {
+          hash,
+          size: existing.size,
+          mimeType,
+          uploadedAt: existing.uploadedAt,
+        };
+        await this.save(data);
+      }
+      return json({
+        assetId,
+        hash,
+        size: existing?.size ?? size,
+        duplicate: true,
+        canonicalAssetId: existingId,
+      });
+    }
+
+    await this.state.storage.put(assetBlobKey(hash), body);
     data.assets[assetId] = { hash, size, mimeType, uploadedAt: Date.now() };
     await this.save(data);
     return json({ assetId, hash, size });
@@ -575,7 +619,11 @@ export class VaultDurableObject {
     if (!meta) {
       return json({ error: 'NOT_FOUND' }, 404);
     }
-    const buf = await this.state.storage.get<ArrayBuffer>(`asset:${assetId}`);
+    // Prefer the content-addressed blob; fall back to the legacy layout
+    // where the blob was stored under its own asset id.
+    const buf =
+      (await this.state.storage.get<ArrayBuffer>(assetBlobKey(meta.hash))) ??
+      (await this.state.storage.get<ArrayBuffer>(`asset:${assetId}`));
     if (!buf) {
       return json({ error: 'NOT_FOUND' }, 404);
     }
@@ -858,7 +906,10 @@ export class VaultDurableObject {
 
   private async hash(input: string): Promise<string> {
     const encoder = new TextEncoder();
-    const data = encoder.encode(input);
+    return this.hashBytes(encoder.encode(input));
+  }
+
+  private async hashBytes(data: BufferSource): Promise<string> {
     const digest = await crypto.subtle.digest('SHA-256', data);
     return Array.from(new Uint8Array(digest))
       .map((b) => b.toString(16).padStart(2, '0'))

@@ -1,4 +1,4 @@
-import type { Operation } from '@thoth/protocol';
+import { MAX_ASSET_BYTES, type Operation } from '@thoth/protocol';
 import { operationSchema } from '@thoth/validation';
 import { OperationQueue } from './queue.js';
 import { applyOperationsToVault, type VaultAdapter } from './vault-applier.js';
@@ -172,8 +172,11 @@ export async function uploadAsset(params: {
   data: ArrayBuffer;
   mimeType?: string;
 }): Promise<{ ok: true; hash: string } | { ok: false; error: string }> {
-  if (params.data.byteLength > 10 * 1024 * 1024) {
-    return { ok: false, error: `Asset too large: ${params.data.byteLength} bytes` };
+  if (params.data.byteLength > MAX_ASSET_BYTES) {
+    return {
+      ok: false,
+      error: `asset too large: ${params.data.byteLength} bytes, limit is ${MAX_ASSET_BYTES}`,
+    };
   }
   try {
     const url = `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/assets/${encodeURIComponent(params.assetId)}`;
@@ -192,11 +195,13 @@ export async function uploadAsset(params: {
       typeof body === 'object' &&
       body !== null &&
       'hash' in body &&
-      typeof (body as { hash: unknown }).hash === 'string'
+      typeof (body as { hash: unknown }).hash === 'string' &&
+      (body as { hash: string }).hash.length > 0
     ) {
       return { ok: true, hash: (body as { hash: string }).hash };
     }
-    return { ok: true, hash: '' };
+    // An empty hash would let a corrupted upload be recorded as valid.
+    return { ok: false, error: 'Asset upload response missing hash' };
   } catch (error) {
     return { ok: false, error: `Asset upload failed: ${errorMessage(error)}` };
   }
