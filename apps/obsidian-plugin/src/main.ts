@@ -602,14 +602,22 @@ export class ThothPlugin extends Plugin {
     });
   }
 
-  private async performSync(): Promise<void> {
+  /**
+   * Runs one sync cycle.
+   *
+   * Resolves to whether the cycle made progress. The retry scheduler treats
+   * `false` as a failure and backs off, so a server that is unreachable stops
+   * being polled at the full interval — previously every error was swallowed
+   * here and the backoff never engaged.
+   */
+  private async performSync(): Promise<boolean> {
     if (this.isPaused) {
       console.debug('Thoth: sync paused, skipping');
-      return;
+      return true;
     }
     if (this.isSyncing) {
       console.debug('Thoth: sync already in progress, skipping');
-      return;
+      return true;
     }
     this.isSyncing = true;
     this.applyGuard.reset();
@@ -623,7 +631,7 @@ export class ThothPlugin extends Plugin {
         !this.settings.apiKey
       ) {
         console.debug('Thoth: sync skipped, settings incomplete');
-        return;
+        return true;
       }
 
       const startedRevision = this.serverRevision;
@@ -767,8 +775,10 @@ export class ThothPlugin extends Plugin {
       }
       // Background asset synchronization
       await this.syncAssets();
+      return syncSucceeded;
     } catch (error) {
       console.error('Thoth: sync failed with exception', error);
+      return false;
     } finally {
       this.isSyncing = false;
       this.updateStatusBar();

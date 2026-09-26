@@ -9,7 +9,6 @@
 
 import { withJitter } from './backoff.js';
 
-const TICKET_TTL_MS = 60_000;
 const PING_INTERVAL_MS = 30_000;
 const DEBOUNCE_MS = 250;
 
@@ -46,12 +45,16 @@ function wsUrlFromHttp(url: string): string {
   return url;
 }
 
+type TicketResult =
+  | { ok: true; ticket: string }
+  | { ok: false; reason: 'unauthorized' | 'network' };
+
 async function fetchTicket(params: {
   serverUrl: string;
   vaultId: string;
   deviceId: string;
   apiKey: string;
-}): Promise<{ ticket: string } | null> {
+}): Promise<TicketResult> {
   try {
     const res = await fetch(
       `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/ws-ticket`,
@@ -64,12 +67,23 @@ async function fetchTicket(params: {
         }),
       }
     );
-    if (!res.ok) return null;
+    if (res.status === 401 || res.status === 403) {
+      // Bad or rotated credentials: reconnecting cannot help until the user
+      // re-registers, so stop instead of hammering the server.
+      return { ok: false, reason: 'unauthorized' };
+    }
+    if (!res.ok) {
+      // Server reachable but refusing for another reason (rate limit, vault
+      // missing). Worth retrying.
+      return { ok: false, reason: 'network' };
+    }
     const body = (await res.json()) as { ticket?: string };
-    if (!body.ticket) return null;
-    return { ticket: body.ticket };
+    if (!body.ticket) {
+      return { ok: false, reason: 'network' };
+    }
+    return { ok: true, ticket: body.ticket };
   } catch {
-    return null;
+    return { ok: false, reason: 'network' };
   }
 }
 
@@ -111,9 +125,17 @@ export function connectRealtime(options: RealtimeOptions) {
     if (state.closed) return;
     setStatus('connecting');
     const ticket = await fetchTicket({ serverUrl, vaultId, deviceId, apiKey });
-    if (!ticket) {
-      // credential error → give up
-      setStatus('closed');
+    if (!ticket.ok) {
+      if (ticket.reason === 'unauthorized') {
+        // Credentials are rejected; only re-registering can fix this, and the
+        // plugin recreates this client when settings change.
+        console.debug('Thoth: realtime ticket rejected, not reconnecting');
+        setStatus('closed');
+        return;
+      }
+      // A transient failure — offline, DNS, server restart — must not leave
+      // realtime dead until the plugin is reloaded.
+      scheduleReconnect();
       return;
     }
     const url = `${wsUrlFromHttp(baseUrl(serverUrl))}/vaults/${encodeURIComponent(vaultId)}/ws?deviceId=${encodeURIComponent(deviceId)}&ticket=${encodeURIComponent(ticket.ticket)}`;

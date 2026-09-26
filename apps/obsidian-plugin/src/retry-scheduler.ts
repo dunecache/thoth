@@ -1,8 +1,14 @@
 import { nextBackoffDelay, resetBackoffDelay } from './backoff.js';
 
 export interface RetrySchedulerOptions {
-  /** Work to run on every tick (e.g. the Phase 9 sync engine). */
-  task: () => Promise<void>;
+  /**
+   * Work to run on every tick.
+   *
+   * Returning `false` marks the run as failed and triggers the backoff, so a
+   * task that catches its own errors still participates in it. Throwing has
+   * the same effect. `void` and `true` count as success.
+   */
+  task: () => Promise<boolean | void>;
   /** Delay between successful ticks. */
   baseIntervalMs?: number;
   /** Upper bound for the backoff delay. */
@@ -30,8 +36,13 @@ export class RetryScheduler {
       globalThis
     )
   ) {
-    this.delayMs = options.baseIntervalMs ?? 60_000;
+    this.baseIntervalMs = options.baseIntervalMs ?? 60_000;
+    this.previousBaseIntervalMs = this.baseIntervalMs;
+    this.delayMs = this.baseIntervalMs;
   }
+
+  private baseIntervalMs: number;
+  private previousBaseIntervalMs: number;
 
   /** Clears any pending timer. */
   private clearTimer(): void {
@@ -59,15 +70,20 @@ export class RetryScheduler {
     }
   }
 
-  /** Update the base interval used for successful runs; next schedule uses new base. */
+  /**
+   * Updates the delay used after a successful run.
+   *
+   * Held as scheduler state rather than written back into the options object,
+   * which is injected by the caller. An in-progress backoff is preserved so
+   * switching intervals does not shorten an existing delay.
+   */
   updateBaseInterval(ms: number): void {
     const base = Math.max(1, ms);
-    // If not backed off (delay equals current base), update immediately
-    if (this.delayMs === (this.options.baseIntervalMs ?? 60_000)) {
+    this.baseIntervalMs = base;
+    if (this.delayMs === this.previousBaseIntervalMs) {
       this.delayMs = base;
     }
-    // Keep options.baseIntervalMs in sync for future resets
-    (this.options as any).baseIntervalMs = base;
+    this.previousBaseIntervalMs = base;
   }
 
   /** Runs the task immediately (manual sync trigger), then reschedules. */
@@ -106,25 +122,31 @@ export class RetryScheduler {
       return;
     }
     this.running = true;
+    let succeeded = true;
     try {
-      await this.options.task();
-      this.delayMs = resetBackoffDelay(this.options.baseIntervalMs ?? 60_000);
+      const result = await this.options.task();
+      succeeded = result !== false;
+      if (succeeded) {
+        this.delayMs = resetBackoffDelay(this.baseIntervalMs);
+      }
     } catch (error) {
+      succeeded = false;
       console.warn('Thoth: retry task failed', error);
+    }
+    if (!succeeded) {
       this.delayMs = nextBackoffDelay(
         this.delayMs,
-        this.options.baseIntervalMs ?? 60_000,
+        this.baseIntervalMs,
         this.options.maxDelayMs ?? 600_000
       );
-    } finally {
-      this.running = false;
-      if (this.pending) {
-        this.pending = false;
-        // Re-run shortly to handle changes that arrived during the run
-        this.schedule(0);
-      } else {
-        this.schedule(this.delayMs);
-      }
+    }
+    this.running = false;
+    if (this.pending) {
+      this.pending = false;
+      // Re-run shortly to handle changes that arrived during the run
+      this.schedule(0);
+    } else {
+      this.schedule(this.delayMs);
     }
   }
 }

@@ -9,7 +9,7 @@ interface FakeTimer {
 }
 
 function createScheduler(
-  task: () => Promise<void>,
+  task: () => Promise<boolean | void>,
   options: { baseIntervalMs?: number; maxDelayMs?: number } = {}
 ) {
   const timers: FakeTimer[] = [];
@@ -126,6 +126,71 @@ describe('RetryScheduler', () => {
     scheduler.start();
 
     expect(timers).toHaveLength(1);
+
+    scheduler.stop();
+  });
+
+  it('backs off when the task reports failure without throwing', async () => {
+    const { scheduler, timers } = createScheduler(() => Promise.resolve(false));
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(2000);
+
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(4000);
+
+    scheduler.stop();
+  });
+
+  it('resets the delay after a successful run', async () => {
+    let failing = true;
+    const { scheduler, timers } = createScheduler(() =>
+      Promise.resolve(!failing)
+    );
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(2000);
+
+    failing = false;
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(1000);
+
+    scheduler.stop();
+  });
+
+  it('applies an updated base interval to later schedules', async () => {
+    const { scheduler, timers } = createScheduler(async () => {});
+
+    scheduler.start();
+    scheduler.updateBaseInterval(5000);
+    fire(timers);
+    await flush();
+
+    expect(timers[0].delay).toBe(5000);
+
+    scheduler.stop();
+  });
+
+  it('does not shorten an in-progress backoff when the interval changes', async () => {
+    const { scheduler, timers } = createScheduler(() => Promise.resolve(false));
+
+    scheduler.start();
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(2000);
+
+    // Realtime came online and raised the idle interval; the current
+    // backoff must stand rather than snapping back to the base.
+    scheduler.updateBaseInterval(300_000);
+    fire(timers);
+    await flush();
+    expect(timers[0].delay).toBe(4000);
 
     scheduler.stop();
   });
