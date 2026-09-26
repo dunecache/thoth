@@ -14,14 +14,82 @@ function errorMessage(error: unknown): string {
 
 const MAX_BATCH_SIZE = 100;
 
+/**
+ * A failed request, classified by what the caller should do about it.
+ *
+ * The two flags exist because a generic failure is not actionable. A
+ * rejected credential cannot be fixed by retrying, and a truncated history
+ * cannot be fixed by retrying either — but they need opposite responses:
+ * re-register, or re-bootstrap from the snapshot. Everything else is
+ * transient and worth another attempt.
+ */
+export interface SyncFailure {
+  /** Human-readable summary, preferring the server's own message. */
+  error: string;
+  /** 401: the device must re-register before syncing can resume. */
+  unauthorized?: boolean;
+  /** 410: the requested revision fell outside retained history. */
+  needsSnapshot?: boolean;
+}
+
+/**
+ * Turns a non-OK response into a classified failure.
+ *
+ * The server sends a structured `{ error, message }` body, and
+ * `packages/protocol` requires clients to branch on `error` rather than the
+ * human-readable text. Reading it here means every call site reports the
+ * server's explanation instead of a bare status number.
+ */
+type FailureResult = { ok: false } & SyncFailure;
+
+async function describeFailure(
+  res: Response,
+  fallback: string
+): Promise<FailureResult> {
+  if (res.status === 401) {
+    return {
+      ok: false,
+      error: (await readServerMessage(res)) ?? `${fallback}: credential rejected`,
+      unauthorized: true,
+    };
+  }
+  if (res.status === 410) {
+    return {
+      ok: false,
+      error: (await readServerMessage(res)) ?? fallback,
+      needsSnapshot: true,
+    };
+  }
+  return { ok: false, error: (await readServerMessage(res)) ?? fallback };
+}
+
+/** Best-effort read of the server's error message, never throwing. */
+async function readServerMessage(res: Response): Promise<string | null> {
+  try {
+    const body = (await res.clone().json()) as unknown;
+    if (
+      typeof body === 'object' &&
+      body !== null &&
+      'message' in body &&
+      typeof body.message === 'string'
+    ) {
+      return body.message;
+    }
+  } catch {
+    // A non-JSON error body is not worth reporting as its own failure.
+  }
+  return null;
+}
+
 /** Result of an upload attempt. */
 export type UploadResult =
-  { ok: true; newRevision: number } | { ok: false; error: string };
+  | { ok: true; newRevision: number }
+  | ({ ok: false } & SyncFailure);
 
 /** Result of a pull attempt. */
 export type PullResult =
   | { ok: true; revision: number; operations: Operation[] }
-  | { ok: false; error: string; needsSnapshot?: boolean };
+  | ({ ok: false } & SyncFailure);
 
 /**
  * Sends queued operations to the server via PushOperations.
@@ -76,7 +144,7 @@ export async function uploadOperations(params: {
           typeof body.message === 'string' ? body.message : 'revision conflict';
         return { ok: false, error: `Conflict: ${message}` };
       }
-      return { ok: false, error: `Push failed with status ${res.status}` };
+      return describeFailure(res, `Push failed with status ${res.status}`);
     }
 
     const body = (await res.json().catch(() => null)) as unknown;
@@ -144,7 +212,7 @@ export async function downloadOperations(params: {
           needsSnapshot: true,
         };
       }
-      return { ok: false, error: `Pull failed with status ${res.status}` };
+      return describeFailure(res, `Pull failed with status ${res.status}`);
     }
 
     const body = (await res.json().catch(() => null)) as unknown;
@@ -175,7 +243,7 @@ export async function uploadAsset(params: {
   assetId: string;
   data: ArrayBuffer;
   mimeType?: string;
-}): Promise<{ ok: true; hash: string } | { ok: false; error: string }> {
+}): Promise<{ ok: true; hash: string } | FailureResult> {
   if (params.data.byteLength > MAX_ASSET_BYTES) {
     return {
       ok: false,
@@ -193,7 +261,10 @@ export async function uploadAsset(params: {
       body: params.data,
     });
     if (!res.ok) {
-      return { ok: false, error: `Asset upload failed with status ${res.status}` };
+      return describeFailure(
+        res,
+        `Asset upload failed with status ${res.status}`
+      );
     }
     const body = (await res.json().catch(() => null)) as unknown;
     if (
@@ -217,12 +288,15 @@ export async function downloadAsset(params: {
   vaultId: string;
   apiKey: string;
   assetId: string;
-}): Promise<{ ok: true; data: ArrayBuffer } | { ok: false; error: string }> {
+}): Promise<{ ok: true; data: ArrayBuffer } | FailureResult> {
   try {
     const url = `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/assets/${encodeURIComponent(params.assetId)}`;
     const res = await fetch(url, { method: 'GET', headers: readHeaders(params.apiKey) });
     if (!res.ok) {
-      return { ok: false, error: `Asset download failed with status ${res.status}` };
+      return describeFailure(
+        res,
+        `Asset download failed with status ${res.status}`
+      );
     }
     const data = await res.arrayBuffer();
     return { ok: true, data };
@@ -239,7 +313,7 @@ export async function downloadAsset(params: {
  */
 export type DownloadAndApplyResult =
   | { ok: true; newRevision: number }
-  | { ok: false; error: string; needsSnapshot?: boolean };
+  | ({ ok: false } & SyncFailure);
 
 export async function downloadAndApply(params: {
   serverUrl: string;
@@ -256,11 +330,7 @@ export async function downloadAndApply(params: {
   });
 
   if (!pull.ok) {
-    return {
-      ok: false,
-      error: pull.error,
-      ...(pull.needsSnapshot ? { needsSnapshot: true } : {}),
-    };
+    return pull;
   }
 
   // Validate operations from server and ignore malformed ones
@@ -307,7 +377,7 @@ export interface SnapshotAsset {
 /** Result of downloading a server snapshot. */
 export type SnapshotResult =
   | { ok: true; revision: number; files: Record<string, string>; assets?: Record<string, SnapshotAsset> }
-  | { ok: false; error: string };
+  | ({ ok: false } & SyncFailure);
 
 /**
  * Downloads a vault snapshot from the server.
@@ -322,10 +392,10 @@ export async function downloadSnapshot(params: {
     const url = `${baseUrl(serverUrl)}/vaults/${encodeURIComponent(vaultId)}/snapshot`;
     const res = await fetch(url, { method: 'GET', headers: readHeaders(apiKey) });
     if (!res.ok) {
-      return {
-        ok: false,
-        error: `Snapshot fetch failed with status ${res.status}`,
-      };
+      return describeFailure(
+        res,
+        `Snapshot fetch failed with status ${res.status}`
+      );
     }
     const body = (await res.json().catch(() => null)) as unknown;
     if (
