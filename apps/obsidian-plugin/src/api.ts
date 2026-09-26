@@ -1,3 +1,5 @@
+import { jsonHeaders, readHeaders } from './auth.js';
+
 export type ConnectionResult =
   { ok: true; message: string } | { ok: false; message: string };
 
@@ -169,7 +171,7 @@ export async function testAuthentication(params: {
       `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/devices/${encodeURIComponent(params.deviceId)}/validate`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders(params.apiKey),
         body: JSON.stringify({ apiKey: params.apiKey }),
       }
     );
@@ -195,10 +197,12 @@ export async function testAuthentication(params: {
 export async function listDevices(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
 }): Promise<ListDevicesResult> {
   try {
     const res = await fetch(
-      `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/devices`
+      `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/devices`,
+      { headers: readHeaders(params.apiKey) }
     );
     if (!res.ok) {
       return {
@@ -223,6 +227,7 @@ export async function listDevices(params: {
 export async function removeDevice(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   deviceId: string;
 }): Promise<DeleteDeviceResult> {
   try {
@@ -230,6 +235,7 @@ export async function removeDevice(params: {
       `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/devices/${encodeURIComponent(params.deviceId)}`,
       {
         method: 'DELETE',
+        headers: readHeaders(params.apiKey),
       }
     );
     if (!res.ok && res.status !== 204) {
@@ -266,6 +272,7 @@ export async function listVaults(serverUrl: string): Promise<ListVaultsResult> {
 export async function rotateApiKey(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   deviceId: string;
 }): Promise<RotateResult> {
   try {
@@ -273,7 +280,7 @@ export async function rotateApiKey(params: {
       `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/devices/${encodeURIComponent(params.deviceId)}/rotate`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: readHeaders(params.apiKey),
       }
     );
     if (!res.ok) {

@@ -9,6 +9,7 @@
 
 import { realtimeServerMessageSchema } from '@thoth/validation';
 
+import { jsonHeaders } from './auth.js';
 import { withJitter } from './backoff.js';
 
 const PING_INTERVAL_MS = 30_000;
@@ -86,7 +87,7 @@ async function fetchTicket(params: {
       `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/ws-ticket`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders(params.apiKey),
         body: JSON.stringify({
           deviceId: params.deviceId,
           apiKey: params.apiKey,

@@ -77,6 +77,20 @@ interface UpgradeResponseInit extends ResponseInit {
   webSocket: WebSocket;
 }
 
+/**
+ * Extracts the bearer token from an Authorization header.
+ *
+ * Returns null when the header is absent or not a bearer credential.
+ */
+function bearerToken(request: Request): string | null {
+  const header = request.headers.get('Authorization');
+  if (!header) {
+    return null;
+  }
+  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+  return match?.[1]?.trim() || null;
+}
+
 /** Structured 400 error matching the protocol ValidationErrorResponse. */
 function validationErrorResponse(issues: ValidationIssue[]): Response {
   return new Response(
@@ -163,6 +177,10 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/metadata' && method === 'GET') {
+      const denied = await this.authorize(request, data);
+      if (denied) {
+        return denied;
+      }
       return json({
         id: data.metadata.id,
         revision: data.snapshot.revision,
@@ -200,6 +218,10 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/snapshot' && method === 'GET') {
+      const denied = await this.authorize(request, data);
+      if (denied) {
+        return denied;
+      }
       return json({
         revision: data.snapshot.revision,
         files: data.snapshot.files,
@@ -208,6 +230,10 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/snapshot' && method === 'POST') {
+      const denied = await this.authorize(request, data);
+      if (denied) {
+        return denied;
+      }
       const body = (await request.json().catch(() => null)) as unknown;
       const { snapshotSchema } = await import('@thoth/validation');
       const parsed = snapshotSchema(body);
@@ -291,6 +317,10 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/devices' && method === 'GET') {
+      const denied = await this.authorize(request, data);
+      if (denied) {
+        return denied;
+      }
       const devices = Object.entries(data.metadata.devices).map(
         ([id, device]) => ({
           id,
@@ -308,6 +338,11 @@ export class VaultDurableObject {
 
       if (!device) {
         return json({ error: 'NOT_FOUND' }, 404);
+      }
+
+      const denied = await this.authorize(request, data);
+      if (denied) {
+        return denied;
       }
 
       if (method === 'DELETE') {
@@ -357,6 +392,48 @@ export class VaultDurableObject {
    *
    * Returns a 429 response when the caller is over budget.
    */
+  /**
+   * Verifies the request carries a credential belonging to a registered
+   * device, returning a 401 response when it does not.
+   *
+   * A vault with no registered devices is left open. That is the bootstrap
+   * window: a device cannot present a key before it has registered one, and
+   * requiring it would make the wizard impossible. It is also safe, because
+   * a vault only holds data once a device has pushed it, and pushing
+   * requires a registered device — so any vault with content has at least
+   * one credential and is therefore protected. Vaults provisioned before
+   * authentication existed stay usable and become protected as soon as a
+   * device registers.
+   */
+  private async authorize(
+    request: Request,
+    data: StoredVault
+  ): Promise<Response | null> {
+    const devices = Object.entries(data.metadata.devices);
+    if (devices.length === 0) {
+      return null;
+    }
+    const token = bearerToken(request);
+    if (!token) {
+      return json(
+        {
+          error: 'UNAUTHORIZED',
+          message: 'missing bearer credential; register this device or re-authenticate',
+        },
+        401
+      );
+    }
+    const hash = await this.hash(token);
+    const known = devices.some(([, device]) => device.apiKeyHash === hash);
+    if (!known) {
+      return json(
+        { error: 'UNAUTHORIZED', message: 'credential is not registered on this vault' },
+        401
+      );
+    }
+    return null;
+  }
+
   private checkRateLimit(request: Request): Response | null {
     // The WebSocket handshake is a single request per connection; counting it
     // against the request budget only penalises clients for reconnecting.
@@ -397,10 +474,9 @@ export class VaultDurableObject {
       return validationErrorResponse(parsed.issues);
     }
 
-    // Feature flag for device auth on mutating endpoints – disabled by default
-    const ENFORCE_DEVICE_AUTH = false;
-    if (ENFORCE_DEVICE_AUTH) {
-      // TODO: validate Authorization header against devices
+    const denied = await this.authorize(request, data);
+    if (denied) {
+      return denied;
     }
     const { baseRevision, operations, protocolVersion } = parsed.value;
     // Client version check / graceful upgrade
@@ -568,6 +644,10 @@ export class VaultDurableObject {
     request: Request,
     data: StoredVault
   ): Promise<Response> {
+    const denied = await this.authorize(request, data);
+    if (denied) {
+      return denied;
+    }
     const body = (await request.json().catch(() => null)) as unknown;
     const parsed = pullOperationsSchema(body);
     if (!parsed.ok) {
@@ -622,6 +702,10 @@ export class VaultDurableObject {
     request: Request,
     data: StoredVault
   ): Promise<Response> {
+    const denied = await this.authorize(request, data);
+    if (denied) {
+      return denied;
+    }
     const url = new URL(request.url);
     const parts = url.pathname.split('/');
     const assetId = parts[2];
@@ -679,6 +763,10 @@ export class VaultDurableObject {
     request: Request,
     data: StoredVault
   ): Promise<Response> {
+    const denied = await this.authorize(request, data);
+    if (denied) {
+      return denied;
+    }
     const url = new URL(request.url);
     const parts = url.pathname.split('/');
     const assetId = parts[2];

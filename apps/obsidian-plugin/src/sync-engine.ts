@@ -1,5 +1,6 @@
 import { MAX_ASSET_BYTES, type Operation } from '@thoth/protocol';
 import { operationSchema } from '@thoth/validation';
+import { binaryHeaders, jsonHeaders, readHeaders } from './auth.js';
 import { OperationQueue } from './queue.js';
 import { applyOperationsToVault, type VaultAdapter } from './vault-applier.js';
 
@@ -31,10 +32,11 @@ export type PullResult =
 export async function uploadOperations(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   baseRevision: number;
   operations: readonly Operation[];
 }): Promise<UploadResult> {
-  const { serverUrl, vaultId, baseRevision, operations } = params;
+  const { serverUrl, vaultId, apiKey, baseRevision, operations } = params;
 
   if (operations.length === 0) {
     return { ok: true, newRevision: baseRevision };
@@ -57,7 +59,7 @@ export async function uploadOperations(params: {
     const url = `${baseUrl(serverUrl)}/vaults/${encodeURIComponent(vaultId)}/push`;
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: jsonHeaders(apiKey),
       body: JSON.stringify({
         baseRevision,
         operations: stampedOps,
@@ -120,15 +122,16 @@ export function acknowledgeOperations(
 export async function downloadOperations(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   sinceRevision: number;
 }): Promise<PullResult> {
-  const { serverUrl, vaultId, sinceRevision } = params;
+  const { serverUrl, vaultId, apiKey, sinceRevision } = params;
 
   try {
     const url = `${baseUrl(serverUrl)}/vaults/${encodeURIComponent(vaultId)}/pull`;
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: jsonHeaders(apiKey),
       body: JSON.stringify({ sinceRevision }),
     });
 
@@ -168,6 +171,7 @@ export async function downloadOperations(params: {
 export async function uploadAsset(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   assetId: string;
   data: ArrayBuffer;
   mimeType?: string;
@@ -182,9 +186,10 @@ export async function uploadAsset(params: {
     const url = `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/assets/${encodeURIComponent(params.assetId)}`;
     const res = await fetch(url, {
       method: 'PUT',
-      headers: {
-        'Content-Type': params.mimeType ?? 'application/octet-stream',
-      },
+      headers: binaryHeaders(
+        params.apiKey,
+        params.mimeType ?? 'application/octet-stream'
+      ),
       body: params.data,
     });
     if (!res.ok) {
@@ -210,11 +215,12 @@ export async function uploadAsset(params: {
 export async function downloadAsset(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   assetId: string;
 }): Promise<{ ok: true; data: ArrayBuffer } | { ok: false; error: string }> {
   try {
     const url = `${baseUrl(params.serverUrl)}/vaults/${encodeURIComponent(params.vaultId)}/assets/${encodeURIComponent(params.assetId)}`;
-    const res = await fetch(url, { method: 'GET' });
+    const res = await fetch(url, { method: 'GET', headers: readHeaders(params.apiKey) });
     if (!res.ok) {
       return { ok: false, error: `Asset download failed with status ${res.status}` };
     }
@@ -238,12 +244,14 @@ export type DownloadAndApplyResult =
 export async function downloadAndApply(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
   sinceRevision: number;
   vault: VaultAdapter;
 }): Promise<DownloadAndApplyResult> {
   const pull = await downloadOperations({
     serverUrl: params.serverUrl,
     vaultId: params.vaultId,
+    apiKey: params.apiKey,
     sinceRevision: params.sinceRevision,
   });
 
@@ -274,6 +282,7 @@ export async function downloadAndApply(params: {
       const result = await downloadAsset({
         serverUrl: params.serverUrl,
         vaultId: params.vaultId,
+        apiKey: params.apiKey,
         assetId,
       });
       if (result.ok) {
@@ -306,11 +315,12 @@ export type SnapshotResult =
 export async function downloadSnapshot(params: {
   serverUrl: string;
   vaultId: string;
+  apiKey: string;
 }): Promise<SnapshotResult> {
-  const { serverUrl, vaultId } = params;
+  const { serverUrl, vaultId, apiKey } = params;
   try {
     const url = `${baseUrl(serverUrl)}/vaults/${encodeURIComponent(vaultId)}/snapshot`;
-    const res = await fetch(url, { method: 'GET' });
+    const res = await fetch(url, { method: 'GET', headers: readHeaders(apiKey) });
     if (!res.ok) {
       return {
         ok: false,

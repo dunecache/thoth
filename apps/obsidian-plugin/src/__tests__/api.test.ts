@@ -75,7 +75,10 @@ describe('testAuthentication', () => {
       'https://sync.example.com/vaults/vault-1/devices/dev-1/validate',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer secret',
+        },
         body: JSON.stringify({ apiKey: 'secret' }),
       }
     );

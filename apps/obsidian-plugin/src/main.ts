@@ -19,6 +19,7 @@ import {
 } from './persistence.js';
 import { OperationQueue } from './queue.js';
 import { createApplyGuard } from './apply-guard.js';
+import { jsonHeaders } from './auth.js';
 import { planBootstrap, type LocalEntry } from './bootstrap-plan.js';
 import { attachVaultListener } from './vault-listener.js';
 import {
@@ -307,7 +308,12 @@ export class ThothPlugin extends Plugin {
       new Notice('Thoth: device not registered');
       return;
     }
-    const res = await rotateApiKey({ serverUrl, vaultId, deviceId });
+    const res = await rotateApiKey({
+      serverUrl,
+      vaultId,
+      apiKey: this.settings.apiKey,
+      deviceId,
+    });
     if (!res.ok) {
       new Notice(`Thoth: rotate failed – ${res.message}`);
       return;
@@ -323,7 +329,12 @@ export class ThothPlugin extends Plugin {
       new Notice('Thoth: device not registered');
       return;
     }
-    const res = await removeDevice({ serverUrl, vaultId, deviceId });
+    const res = await removeDevice({
+      serverUrl,
+      vaultId,
+      apiKey: this.settings.apiKey,
+      deviceId,
+    });
     if (!res.ok) {
       new Notice(`Thoth: remove failed – ${res.message}`);
       return;
@@ -340,7 +351,12 @@ export class ThothPlugin extends Plugin {
       new Notice('Thoth: server URL and vault ID are required');
       return;
     }
-    const res = await removeDevice({ serverUrl, vaultId, deviceId });
+    const res = await removeDevice({
+      serverUrl,
+      vaultId,
+      apiKey: this.settings.apiKey,
+      deviceId,
+    });
     if (!res.ok) {
       new Notice(`Thoth: remove failed – ${res.message}`);
       return;
@@ -361,7 +377,11 @@ export class ThothPlugin extends Plugin {
       this.deviceList = [];
       return;
     }
-    const res = await listDevices({ serverUrl, vaultId });
+    const res = await listDevices({
+      serverUrl,
+      vaultId,
+      apiKey: this.settings.apiKey,
+    });
     if (res.ok) {
       this.deviceList = res.devices;
     } else {
@@ -451,7 +471,11 @@ export class ThothPlugin extends Plugin {
       new Notice('Thoth: configure server and vault first');
       return;
     }
-    const snap = await downloadSnapshot({ serverUrl: this.settings.serverUrl, vaultId: this.settings.vaultId });
+    const snap = await downloadSnapshot({
+      serverUrl: this.settings.serverUrl,
+      vaultId: this.settings.vaultId,
+      apiKey: this.settings.apiKey,
+    });
     if (!snap.ok) {
       new Notice(`Thoth: export failed — ${snap.error}`);
       return;
@@ -513,7 +537,7 @@ export class ThothPlugin extends Plugin {
       `${serverUrl.replace(/\/+$/, '')}/vaults/${encodeURIComponent(vaultId)}/snapshot`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: jsonHeaders(this.settings.apiKey),
         body: JSON.stringify(validated.value),
       }
     );
@@ -534,7 +558,11 @@ export class ThothPlugin extends Plugin {
     if (this.isPaused) return;
     if (!this.settings.serverUrl || !this.settings.vaultId) return;
     try {
-      const snap = await downloadSnapshot({ serverUrl: this.settings.serverUrl, vaultId: this.settings.vaultId });
+      const snap = await downloadSnapshot({
+        serverUrl: this.settings.serverUrl,
+        vaultId: this.settings.vaultId,
+        apiKey: this.settings.apiKey,
+      });
       if (!snap.ok || !snap.assets) return;
       const adapter = this.createVaultAdapter();
       let downloaded = 0;
@@ -542,7 +570,12 @@ export class ThothPlugin extends Plugin {
         if (downloaded >= 5) break; // incremental, avoid blocking
         const exists = await adapter.exists(path);
         if (exists) continue;
-        const res = await downloadAsset({ serverUrl: this.settings.serverUrl, vaultId: this.settings.vaultId, assetId: meta.assetId });
+        const res = await downloadAsset({
+          serverUrl: this.settings.serverUrl,
+          vaultId: this.settings.vaultId,
+          apiKey: this.settings.apiKey,
+          assetId: meta.assetId,
+        });
         if (!res.ok) {
           console.warn('Thoth: background asset download failed', { path, assetId: meta.assetId, error: res.error });
           continue;
@@ -709,6 +742,7 @@ export class ThothPlugin extends Plugin {
       const downloadResult = await downloadAndApply({
         serverUrl: this.settings.serverUrl,
         vaultId: this.settings.vaultId,
+        apiKey: this.settings.apiKey,
         sinceRevision: this.serverRevision,
         vault: adapter,
       });
@@ -754,6 +788,7 @@ export class ThothPlugin extends Plugin {
         const latest = await downloadOperations({
           serverUrl: this.settings.serverUrl,
           vaultId: this.settings.vaultId,
+          apiKey: this.settings.apiKey,
           sinceRevision: this.serverRevision,
         });
         if (latest.ok && latest.revision > this.serverRevision) {
@@ -763,6 +798,7 @@ export class ThothPlugin extends Plugin {
             const r = await downloadAsset({
               serverUrl: this.settings.serverUrl,
               vaultId: this.settings.vaultId,
+              apiKey: this.settings.apiKey,
               assetId,
             });
             return r.ok ? r.data : null;
@@ -790,6 +826,7 @@ export class ThothPlugin extends Plugin {
         const uploadResult = await uploadOperations({
           serverUrl: this.settings.serverUrl,
           vaultId: this.settings.vaultId,
+          apiKey: this.settings.apiKey,
           baseRevision,
           operations: batch,
         });
@@ -874,6 +911,7 @@ export class ThothPlugin extends Plugin {
       const res = await uploadAsset({
         serverUrl: this.settings.serverUrl,
         vaultId: this.settings.vaultId,
+        apiKey: this.settings.apiKey,
         assetId: op.payload.assetId,
         data,
         mimeType: op.payload.mimeType,
@@ -904,7 +942,11 @@ export class ThothPlugin extends Plugin {
     if (!serverUrl || !vaultId) {
       return null;
     }
-    const snapshotResult = await downloadSnapshot({ serverUrl, vaultId });
+    const snapshotResult = await downloadSnapshot({
+      serverUrl,
+      vaultId,
+      apiKey: this.settings.apiKey,
+    });
     if (!snapshotResult.ok) {
       console.warn('Thoth: snapshot restore failed', { error: snapshotResult.error });
       return null;
@@ -912,7 +954,12 @@ export class ThothPlugin extends Plugin {
     const assets = snapshotResult.assets ?? {};
     await applySnapshotToVault(adapter, snapshotResult.files);
     for (const [path, meta] of Object.entries(assets)) {
-      const assetRes = await downloadAsset({ serverUrl, vaultId, assetId: meta.assetId });
+      const assetRes = await downloadAsset({
+        serverUrl,
+        vaultId,
+        apiKey: this.settings.apiKey,
+        assetId: meta.assetId,
+      });
       if (!assetRes.ok) {
         console.warn('Thoth: snapshot asset download failed', {
           path,
@@ -1036,7 +1083,11 @@ export class ThothPlugin extends Plugin {
     }
     new Notice('Thoth: rescanning vault…');
     try {
-      const snap = await downloadSnapshot({ serverUrl: this.settings.serverUrl, vaultId: this.settings.vaultId });
+      const snap = await downloadSnapshot({
+        serverUrl: this.settings.serverUrl,
+        vaultId: this.settings.vaultId,
+        apiKey: this.settings.apiKey,
+      });
       if (!snap.ok) {
         new Notice(`Thoth: rescan failed — ${snap.error}`);
         return;
