@@ -24,6 +24,7 @@ describe('protocol', () => {
   it('exposes stable error identifiers', () => {
     expect(ERROR_CODES).toContain('BAD_REQUEST');
     expect(ERROR_CODES).toContain('UNAUTHORIZED');
+    expect(ERROR_CODES).toContain('DEVICE_NOT_REGISTERED');
     expect(ERROR_CODES).toContain('FORBIDDEN');
     expect(ERROR_CODES).toContain('NOT_FOUND');
     expect(ERROR_CODES).toContain('CONFLICT');

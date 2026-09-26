@@ -426,8 +426,15 @@ export class VaultDurableObject {
     const hash = await this.hash(token);
     const known = devices.some(([, device]) => device.apiKeyHash === hash);
     if (!known) {
+      // The credential parsed but matches no device here — it was revoked,
+      // rotated, or belongs to another vault. All three are resolved the
+      // same way by the client, so they share one code.
       return json(
-        { error: 'UNAUTHORIZED', message: 'credential is not registered on this vault' },
+        {
+          error: 'DEVICE_NOT_REGISTERED',
+          message:
+            'this device is no longer registered on the vault; register it again',
+        },
         401
       );
     }
@@ -802,7 +809,15 @@ export class VaultDurableObject {
     const { deviceId, apiKey } = parsed.value;
     const device = data.metadata.devices[deviceId];
     if (!device) {
-      return json({ error: 'UNAUTHORIZED', message: 'device not found' }, 401);
+      // Matches the data-route code so the plugin treats a revoked device
+      // the same way however it discovers it.
+      return json(
+        {
+          error: 'DEVICE_NOT_REGISTERED',
+          message: 'this device is no longer registered on the vault',
+        },
+        401
+      );
     }
     const hash = await this.hash(apiKey);
     if (hash !== device.apiKeyHash) {

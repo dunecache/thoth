@@ -9,6 +9,14 @@
 export const ERROR_CODES = [
   'BAD_REQUEST',
   'UNAUTHORIZED',
+  /**
+   * The credential presented was well-formed but belongs to a device that
+   * is no longer registered on this vault. Distinct from `UNAUTHORIZED`
+   * because the client's recovery differs: this one is always resolved by
+   * re-registering the device, whereas `UNAUTHORIZED` means the credential
+   * itself was absent or malformed.
+   */
+  'DEVICE_NOT_REGISTERED',
   'FORBIDDEN',
   'NOT_FOUND',
   'CONFLICT',

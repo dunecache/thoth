@@ -107,6 +107,24 @@ describe('device authentication', () => {
       })
     );
     expect(res.status).toBe(401);
+    // A well-formed credential on a device that is not registered is the
+    // case the client recovers from by re-registering.
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'DEVICE_NOT_REGISTERED'
+    );
+  });
+
+  it('reports a malformed credential as UNAUTHORIZED, not as revoked', async () => {
+    const { doObject } = await vaultWithDevice();
+    const res = await doObject.fetch(
+      new Request('https://internal/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseRevision: 0, operations: [] }),
+      })
+    );
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe('UNAUTHORIZED');
   });
 
   it('accepts a push with a valid credential', async () => {
@@ -167,6 +185,52 @@ describe('device authentication', () => {
       new Request(`https://internal/devices/${DEVICE_ID}/rotate`, { method: 'POST' })
     );
     expect(rotate.status).toBe(401);
+  });
+
+  it('reports a revoked device the same way on the ticket endpoint', async () => {
+    // The realtime client discovers revocation through the ticket, so the
+    // code has to match the data routes or it cannot recognise the cause.
+    const { doObject, apiKey } = await vaultWithDevice();
+    const removed = await doObject.fetch(
+      authed(`/devices/${DEVICE_ID}`, 'DELETE', apiKey)
+    );
+    expect(removed.status).toBe(204);
+
+    // Re-register so the vault has a device again, then remove it by id so
+    // the ticket request carries an unknown deviceId with a real-shaped key.
+    const reg = await doObject.fetch(
+      new Request('https://internal/devices', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: DEVICE_ID }),
+      })
+    );
+    expect(reg.status).toBe(201);
+
+    const res = await doObject.fetch(
+      new Request('https://internal/ws-ticket', {
+        method: 'POST',
+        body: JSON.stringify({
+          deviceId: '99999999-9999-4999-8999-999999999999',
+          apiKey,
+        }),
+      })
+    );
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'DEVICE_NOT_REGISTERED'
+    );
+  });
+
+  it('keeps UNAUTHORIZED for a ticket with a wrong key', async () => {
+    const { doObject } = await vaultWithDevice();
+    const res = await doObject.fetch(
+      new Request('https://internal/ws-ticket', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId: DEVICE_ID, apiKey: 'wrong-key' }),
+      })
+    );
+    expect(res.status).toBe(401);
+    expect(((await res.json()) as { error: string }).error).toBe('UNAUTHORIZED');
   });
 
   it('guards asset upload and download', async () => {
