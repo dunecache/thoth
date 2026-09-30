@@ -306,6 +306,21 @@ export class VaultDurableObject {
       }
       const { deviceId: requestedId, name } = parsed.value;
       const MAX_DEVICES = 20;
+
+      // Reusing an id is checked before the cap, and reported honestly.
+      // This previously fell through a ternary that substituted a fresh uuid
+      // for a taken id, so the 409 below was unreachable: a client could not
+      // learn its id was taken, and could not free it. That is what made
+      // re-authentication leak a device slot on every attempt.
+      if (requestedId && data.metadata.devices[requestedId]) {
+        return json(
+          {
+            error: 'DEVICE_ALREADY_REGISTERED',
+            message: 'this device id is already registered on the vault',
+          },
+          409
+        );
+      }
       if (Object.keys(data.metadata.devices).length >= MAX_DEVICES) {
         return json(
           {
@@ -315,19 +330,7 @@ export class VaultDurableObject {
           409
         );
       }
-      const deviceId =
-        requestedId && !data.metadata.devices[requestedId]
-          ? requestedId
-          : crypto.randomUUID();
-      if (data.metadata.devices[deviceId]) {
-        return json(
-          {
-            error: 'DEVICE_ALREADY_REGISTERED',
-            message: 'device id already in use',
-          },
-          409
-        );
-      }
+      const deviceId = requestedId ?? crypto.randomUUID();
       const apiKey = crypto.randomUUID();
       const apiKeyHash = await this.hash(apiKey);
       data.metadata.devices[deviceId] = {

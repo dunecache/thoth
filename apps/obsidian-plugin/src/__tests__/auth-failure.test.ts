@@ -438,3 +438,111 @@ describe('sustained failures', () => {
     expect(plugin.syncFailure?.reason).toContain('socket exploded');
   });
 });
+
+/**
+ * Device-slot reclamation.
+ *
+ * A vault caps its devices, and re-authentication used to mint a fresh id
+ * every time, so each recovery permanently consumed a slot until the user
+ * locked themselves out and had to delete devices by hand.
+ */
+describe('device id reclamation', () => {
+  /** Answers registration, and records the ids it was asked for. */
+  function stubRegistration(
+    handler: (deviceId: string, call: number) => Response
+  ): { requested: string[] } {
+    const requested: string[] = [];
+    stubFetch((url, init) => {
+      if (url.includes('/devices') && init?.method === 'POST') {
+        // init.body is a string in practice, but RequestInit types it
+        // as BodyInit, so narrow before parsing.
+        const raw = typeof init.body === 'string' ? init.body : '';
+        const body = JSON.parse(raw) as { deviceId: string };
+        requested.push(body.deviceId);
+        return handler(body.deviceId, requested.length);
+      }
+      return jsonResponse(401, REVOKED);
+    });
+    return { requested };
+  }
+
+  const created = (deviceId: string) =>
+    jsonResponse(201, { deviceId, apiKey: 'fresh-key' });
+
+  it('reuses the device id it already held', async () => {
+    const { requested } = stubRegistration(() => created(DEVICE_ID));
+    await boot();
+    const sync = (plugin as unknown as { performSync(): Promise<string> }).performSync.bind(plugin);
+    await sync();
+
+    await plugin.reauthenticate();
+
+    // The first and only registration must ask for the id already stored, so
+    // recovery reclaims the slot rather than consuming one.
+    expect(requested).toEqual([DEVICE_ID]);
+    expect(plugin.settings.deviceId).toBe(DEVICE_ID);
+  });
+
+  it('falls back to a new id only when the old one is still taken', async () => {
+    const { requested } = stubRegistration((_deviceId, call) =>
+      call === 1
+        ? jsonResponse(409, {
+            error: 'DEVICE_ALREADY_REGISTERED',
+            message: 'this device id is already registered on the vault',
+          })
+        : created('replacement-id')
+    );
+    await boot();
+    const sync = (plugin as unknown as { performSync(): Promise<string> }).performSync.bind(plugin);
+    await sync();
+
+    await plugin.reauthenticate();
+
+    // First tries the id it held, then a genuinely new one.
+    expect(requested).toHaveLength(2);
+    expect(requested[0]).toBe(DEVICE_ID);
+    expect(requested[1]).not.toBe(DEVICE_ID);
+    expect(requested[1]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+    );
+    expect(plugin.settings.deviceId).toBe('replacement-id');
+  });
+
+  it('explains what to do when the vault is full', async () => {
+    stubRegistration(() =>
+      jsonResponse(409, {
+        error: 'DEVICE_LIMIT_REACHED',
+        message: 'maximum of 20 devices per vault',
+      })
+    );
+    await boot();
+    const sync = (plugin as unknown as { performSync(): Promise<string> }).performSync.bind(plugin);
+    await sync();
+
+    await plugin.reauthenticate();
+
+    expect(
+      notices.some((n) => n.includes('maximum number of devices')),
+      'a full vault must tell the user what to do, not just fail'
+    ).toBe(true);
+    // The halt must stand: resuming on a revoked key is the loop being fixed.
+    expect(plugin.authFailure).toBeDefined();
+  });
+
+  it('does not try to reclaim when the vault is full', async () => {
+    // Retrying with a new id could not help — the vault is full either way.
+    const { requested } = stubRegistration(() =>
+      jsonResponse(409, {
+        error: 'DEVICE_LIMIT_REACHED',
+        message: 'maximum of 20 devices per vault',
+      })
+    );
+    await boot();
+    const sync = (plugin as unknown as { performSync(): Promise<string> }).performSync.bind(plugin);
+    await sync();
+
+    await plugin.reauthenticate();
+
+    expect(requested).toEqual([DEVICE_ID]);
+  });
+});

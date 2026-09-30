@@ -5,7 +5,12 @@ export type ConnectionResult =
 
 export type RegisterResult =
   | { ok: true; deviceId: string; apiKey: string }
-  | { ok: false; message: string };
+  | {
+      ok: false;
+      message: string;
+      /** The server's machine-readable code, when it sent one. */
+      code?: string;
+    };
 
 export type RotateResult =
   | { ok: true; deviceId: string; apiKey: string }
@@ -168,11 +173,17 @@ export async function registerDevice(params: {
       }
     );
     if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { message?: string };
+      const body = (await res.json().catch(() => ({}))) as {
+        message?: string;
+        error?: string;
+      };
       return {
         ok: false,
         message:
           body.message ?? `Registration failed with status ${res.status}`,
+        // Carried so a caller can react to a specific cause rather than
+        // matching on the human-readable text.
+        ...(body.error ? { code: body.error } : {}),
       };
     }
     const body = (await res.json()) as { deviceId: string; apiKey: string };

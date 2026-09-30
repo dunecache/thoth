@@ -365,3 +365,75 @@ describe('device authentication', () => {
     expect(withOld.status).toBe(401);
   });
 });
+
+describe('device registration', () => {
+  /** A vault with one registered device. */
+  async function vault(): Promise<{ doObject: VaultDurableObject }> {
+    return { doObject: (await vaultWithDevice()).doObject };
+  }
+
+  function register(
+    doObject: VaultDurableObject,
+    body: Record<string, unknown>
+  ): Promise<Response> {
+    return doObject.fetch(
+      new Request('https://internal/devices', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      })
+    );
+  }
+
+  it('reports a taken device id instead of silently substituting one', async () => {
+    const { doObject } = await vault();
+
+    const res = await register(doObject, { deviceId: DEVICE_ID });
+
+    // This branch was unreachable: the id was replaced with a fresh uuid, so
+    // a client could not learn its id was taken and could not free it. That
+    // is what made re-authentication consume a device slot every time.
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe(
+      'DEVICE_ALREADY_REGISTERED'
+    );
+  });
+
+  it('lets the same id be reclaimed once the device is removed', async () => {
+    const { doObject, apiKey } = await vaultWithDevice();
+
+    const removed = await doObject.fetch(
+      authed(`/devices/${DEVICE_ID}`, 'DELETE', apiKey)
+    );
+    expect(removed.status).toBe(204);
+
+    // Recovery after a revocation: the id is free, so reuse costs no slot.
+    const res = await register(doObject, { deviceId: DEVICE_ID });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { deviceId: string; apiKey: string };
+    expect(body.deviceId).toBe(DEVICE_ID);
+    expect(body.apiKey).toBeTruthy();
+  });
+
+  it('does not count a re-registration against the device cap', async () => {
+    const { doObject } = await vault();
+    // Fill the vault to its cap.
+    for (let i = 0; i < 19; i += 1) {
+      const res = await register(doObject, { name: `device-${i}` });
+      expect(res.status).toBe(201);
+    }
+    const atCap = await register(doObject, { name: 'one-too-many' });
+    expect(atCap.status).toBe(409);
+    expect(((await atCap.json()) as { error: string }).error).toBe(
+      'DEVICE_LIMIT_REACHED'
+    );
+
+    // Reusing an existing id is not a new device, so it must not be refused
+    // for the cap — it should be refused for being taken, which the client
+    // can act on by freeing the id.
+    const reuse = await register(doObject, { deviceId: DEVICE_ID });
+    expect(reuse.status).toBe(409);
+    expect(((await reuse.json()) as { error: string }).error).toBe(
+      'DEVICE_ALREADY_REGISTERED'
+    );
+  });
+});

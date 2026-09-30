@@ -101,6 +101,17 @@ const FAILURE_NOTICE_THRESHOLD = 3;
  */
 type SyncOutcome = 'success' | 'skipped' | 'retry' | 'halt';
 
+/** Why a registration attempt did not produce a usable credential. */
+export type RegisterOutcome =
+  | { ok: true }
+  | {
+      ok: false;
+      reason: 'NO_TARGET' | 'REJECTED';
+      /** The server's machine-readable code, e.g. DEVICE_ALREADY_REGISTERED. */
+      code?: string;
+      message?: string;
+    };
+
 // Obsidian loads the plugin entry module and instantiates its default
 // export. The default export is the Obsidian plugin contract; the named
 // export lets other modules import the type without the runtime cycle.
@@ -357,24 +368,32 @@ export class ThothPlugin extends Plugin {
   /**
    * Registers this device and stores the issued credential.
    *
-   * Returns whether registration succeeded. Callers that recover from a
-   * revoked credential must branch on this rather than on whether settings
-   * now hold a key: after a failed attempt the previous, revoked key is
-   * still present, so that check would report success.
+   * Callers that recover from a revoked credential must branch on the result
+   * rather than on whether settings now hold a key: after a failed attempt the
+   * previous, revoked key is still present, so that check would report
+   * success.
+   *
+   * `preferredDeviceId` lets a recovery pass the id it already holds so it
+   * reclaims it instead of adding another device to the vault.
    */
-  async registerDevice(): Promise<boolean> {
+  async registerDevice(preferredDeviceId?: string): Promise<RegisterOutcome> {
     const { serverUrl, vaultId, deviceName } = this.settings;
     if (!serverUrl || !vaultId) {
       new Notice('Thoth: server URL and vault ID are required');
-      return false;
+      return { ok: false, reason: 'NO_TARGET' };
     }
     // no manual deviceId input — auto uuid, trim name with fallback (AGENTS: wizard S3)
     const name = deviceName.trim() || 'Obsidian Device';
-    const deviceId = uuidv4();
+    // Re-registering prefers the id we already hold. A new uuid is only
+    // correct when this device has never been on this vault — after a
+    // revocation the id is usually free again, and reusing it means recovery
+    // does not consume a device slot every time.
+    const deviceId = preferredDeviceId?.trim() || uuidv4();
     const res = await registerDevice({ serverUrl, vaultId, deviceId, name });
     if (!res.ok) {
+      console.warn('Thoth: registration failed', { code: res.code, message: res.message });
       new Notice(`Thoth: registration failed – ${res.message}`);
-      return false;
+      return { ok: false, reason: 'REJECTED', code: res.code, message: res.message };
     }
     this.settings = withSetting(this.settings, 'deviceId', res.deviceId);
     this.settings = withSetting(this.settings, 'apiKey', res.apiKey);
@@ -385,13 +404,14 @@ export class ThothPlugin extends Plugin {
     await this.saveSettings();
     await this.refreshDeviceList();
     new Notice('Thoth: device registered');
-    return true;
+    return { ok: true };
   }
 
   /**
    * Re-registers this device and resumes syncing.
    *
-   * The recovery path for a revoked credential. Two things it must get right:
+   * The recovery path for a revoked credential. Three things it must get
+   * right:
    *
    * - the realtime client is torn down first. `ensureRealtimeClient` returns
    *   early when a client already exists, and that client holds the revoked
@@ -400,9 +420,13 @@ export class ThothPlugin extends Plugin {
    * - the queue is left untouched. A user reaching this point may be holding
    *   unsynced edits, and discarding them to fix an auth problem would be a
    *   far worse outcome than the one being fixed.
+   * - the device id is reclaimed rather than replaced. A vault caps its
+   *   devices, so minting a fresh id on every recovery exhausted that cap and
+   *   locked the user out entirely. After a revocation the id is normally
+   *   free again, and reusing it costs nothing.
    */
   async reauthenticate(): Promise<void> {
-    const { serverUrl, vaultId } = this.settings;
+    const { serverUrl, vaultId, deviceId: previousId } = this.settings;
     if (!serverUrl || !vaultId) {
       new Notice('Thoth: server URL and vault ID are required');
       return;
@@ -413,8 +437,23 @@ export class ThothPlugin extends Plugin {
     this.realtimeClient = undefined;
     this.realtimeStatus = 'closed';
 
-    const registered = await this.registerDevice();
-    if (!registered) {
+    let outcome = await this.registerDevice(previousId);
+
+    if (!outcome.ok && outcome.code === 'DEVICE_ALREADY_REGISTERED') {
+      // The id is still held, which means the credential was rotated rather
+      // than the device removed. The old key cannot authorise deleting it, so
+      // fall back to a new id and say so, since that does cost a slot.
+      console.warn('Thoth: previous device id is still in use, using a new one');
+      outcome = await this.registerDevice();
+    }
+
+    if (!outcome.ok) {
+      if (outcome.code === 'DEVICE_LIMIT_REACHED') {
+        new Notice(
+          'Thoth: this vault already has the maximum number of devices. ' +
+            'Remove one under Registered devices, then re-authenticate.'
+        );
+      }
       // The previous, revoked credential is still in settings. Resuming on it
       // would re-enter the retry loop this whole path exists to stop, so the
       // halt stands.
