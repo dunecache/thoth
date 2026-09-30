@@ -1,6 +1,12 @@
 import { App, Notice, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 
-import { checkHealth, parseImportVaultLink, validateServerUrl } from './api.js';
+import {
+  buildInviteLink,
+  checkHealth,
+  parseImportVaultLink,
+  validateServerUrl,
+} from './api.js';
+import { copyToClipboard } from './clipboard.js';
 import type { ThothPlugin } from './main.js';
 import { pushRecentVaultId, withSetting, type ThothSettings } from './settings.js';
 import { defaultDeviceName } from './device-name.js';
@@ -53,7 +59,9 @@ export class ThothSettingTab extends PluginSettingTab {
 
     // S2 — Vault picker
     const vaultSetting = new Setting(containerEl).setName('2. Vault').setDesc(
-      hasVault ? `Selected: ${this.plugin.settings.vaultId.slice(0, 8)}…` : 'Create a new vault or import via thoth:// link'
+      hasVault
+        ? `Vault ID: ${this.plugin.settings.vaultId}`
+        : 'Create a new vault or import via thoth:// link'
     );
     // Recent vaults dropdown
     if (this.plugin.settings.lastVaultIds.length > 0) {
@@ -124,6 +132,42 @@ export class ThothSettingTab extends PluginSettingTab {
           this.display();
         })
       );
+
+    // Invite — the inverse of the import field above. Without this there is
+    // no way to bring a second device onto a vault: the server no longer lists
+    // vaults, so the link is the only route in.
+    const inviteLink = buildInviteLink(
+      this.plugin.settings.serverUrl,
+      this.plugin.settings.vaultId
+    );
+    if (inviteLink) {
+      let inviteField: TextComponent | null = null;
+      new Setting(containerEl)
+        .setName('Invite another device')
+        .setDesc(
+          'Send this link to the other device, then paste it into "Import vault link" there. ' +
+            'It contains no credential — that device registers itself and gets its own key.'
+        )
+        .addText((text) => {
+          text.setValue(inviteLink);
+          text.setDisabled(true);
+          text.inputEl.style.minWidth = '260px';
+          inviteField = text;
+        })
+        .addButton((btn) =>
+          btn.setButtonText('Copy').onClick(async () => {
+            const copied = await copyToClipboard(inviteLink);
+            if (copied) {
+              new Notice('✓ Invite link copied');
+              return;
+            }
+            // Clipboard access is unavailable on some platforms. Selecting the
+            // text means the user can copy it without leaving Obsidian.
+            inviteField?.inputEl?.select();
+            new Notice('Copy the selected link manually');
+          })
+        );
+    }
 
     new Setting(containerEl)
       .setName('Synced file extensions')

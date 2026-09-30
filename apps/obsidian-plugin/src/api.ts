@@ -46,6 +46,34 @@ export function validateServerUrl(url: string): { ok: true; url: string } | { ok
 
 export type ImportVaultLink = { serverUrl: string; vaultId: string };
 
+/**
+ * Builds the invite link another device uses to join this vault.
+ *
+ * Defined beside `parseImportVaultLink` so the two cannot drift, and it
+ * deliberately carries only the server URL and vault id. The API key is never
+ * included: the joining device registers itself and receives its own
+ * credential, so a link that granted access would turn any forwarded invite
+ * into a permanent, unexpirable grant.
+ *
+ * Returns null when either half is missing, since a partial link would parse
+ * as invalid on the other side and fail with a confusing message.
+ */
+export function buildInviteLink(
+  serverUrl: string,
+  vaultId: string
+): string | null {
+  const validated = validateServerUrl(serverUrl);
+  const id = vaultId.trim();
+  if (!validated.ok || !id) {
+    return null;
+  }
+  const params = new URLSearchParams({
+    serverUrl: validated.url,
+    vaultId: id,
+  });
+  return `thoth://?${params.toString()}`;
+}
+
 export function parseImportVaultLink(link: string): ImportVaultLink | null {
   const trimmed = link.trim();
   if (!trimmed) return null;
