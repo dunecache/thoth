@@ -97,15 +97,6 @@ export function createRouter(env: Env) {
         );
       }
 
-      if (url.pathname === '/vaults' && request.method === 'GET') {
-        const stub = stubFor(VAULT_INDEX_NAME);
-        if (stub) {
-          const res = await stub.fetch('https://internal/index/list');
-          return addCors(res);
-        }
-        return addCors(new Response(JSON.stringify({ vaults: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
-      }
-
       if (url.pathname === '/vaults' && request.method === 'POST') {
         const id = crypto.randomUUID();
         {

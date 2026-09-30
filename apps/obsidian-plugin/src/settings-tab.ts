@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 
-import { checkHealth, listVaults, parseImportVaultLink, validateServerUrl } from './api.js';
+import { checkHealth, parseImportVaultLink, validateServerUrl } from './api.js';
 import type { ThothPlugin } from './main.js';
 import { pushRecentVaultId, withSetting, type ThothSettings } from './settings.js';
 import { defaultDeviceName } from './device-name.js';
@@ -93,41 +93,6 @@ export class ThothSettingTab extends PluginSettingTab {
         })
     );
     // Server vaults list after Server URL (GET /vaults)
-    if (hasServer) {
-      const serverSetting2 = new Setting(containerEl).setName('Server vaults').setDesc('Loading vaults from server…');
-      void listVaults(this.plugin.settings.serverUrl).then((res) => {
-        if (!res.ok || res.vaults.length === 0) {
-          serverSetting2.setDesc(res.ok ? 'No vaults on server yet' : `Could not list: ${res.message}`);
-          return;
-        }
-        const vaults = res.vaults.filter((id) => !this.plugin.settings.lastVaultIds.includes(id));
-        if (vaults.length === 0) {
-          serverSetting2.setDesc('All server vaults already in recent');
-          return;
-        }
-        serverSetting2.setDesc(`Found ${vaults.length} vault(s) on server`);
-        serverSetting2.addDropdown((dd) => {
-          dd.addOption('', '— Server vaults —');
-          for (const id of vaults.slice(0, 20)) {
-            dd.addOption(id, `${id.slice(0, 8)}…`);
-          }
-          const cur = this.plugin.settings.vaultId;
-          dd.setValue(cur && vaults.includes(cur) ? cur : '');
-          dd.onChange(async (value) => {
-            if (!value) return;
-            this.plugin.settings = withSetting(this.plugin.settings, 'vaultId', value);
-            this.plugin.settings = pushRecentVaultId(this.plugin.settings, value);
-            await this.plugin.saveSettings();
-            await this.plugin.refreshDeviceList();
-            const list = this.plugin.deviceList ?? [];
-            if (!list.some((d) => d.id === this.plugin.settings.deviceId)) {
-              await this.plugin.registerDevice();
-            }
-            this.display();
-          });
-        });
-      });
-    }
     // Import link. The text component is captured in a local so the button
     // handler can read it, rather than being stashed on the Setting object.
     let importField = '';

@@ -13,6 +13,11 @@ Base URL: `https://<worker>/`
 - `GET /vaults/:id` → `{ id, revision }`
 - `DELETE /vaults/:id` → 204
 
+There is deliberately no `GET /vaults`. Enumerating every vault on a
+server hands any caller a list of ids to target, so vault discovery is
+client-side only: create one, pick a recently used one, or import a
+`thoth://` link from the device that already has it.
+
 ### Sync
 
 - `POST /vaults/:id/push`

@@ -35,7 +35,6 @@ const ROUTE_POLICY: ReadonlyArray<{
     why: 'destructive: only a registered device may destroy a vault',
   },
   { path: '/metadata', method: 'GET', guarded: true, why: 'exposes the vault revision' },
-  { path: '/index/list', method: 'GET', guarded: false, why: 'index metadata' },
   { path: '/index/add', method: 'POST', guarded: false, why: 'creation chokepoint, no vault yet' },
   { path: '/snapshot', method: 'GET', guarded: true, why: 'returns every note' },
   { path: '/snapshot', method: 'POST', guarded: true, why: 'overwrites the vault' },

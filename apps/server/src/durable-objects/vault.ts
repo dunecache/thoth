@@ -192,10 +192,6 @@ export class VaultDurableObject {
     }
 
     // Vault index for GET /vaults (stored in DO id _vault-index)
-    if (url.pathname === '/index/list' && method === 'GET') {
-      const list = (await this.state.storage.get<string[]>('index:vaults')) ?? [];
-      return json({ vaults: list });
-    }
     if (url.pathname === '/index/add' && method === 'POST') {
       const body = (await request.json().catch(() => null)) as { id?: string } | null;
       const id = body?.id?.trim();

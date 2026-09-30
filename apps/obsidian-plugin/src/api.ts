@@ -255,21 +255,6 @@ export async function removeDevice(params: {
   }
 }
 
-export type ListVaultsResult = { ok: true; vaults: string[] } | { ok: false; message: string };
-
-/** Lists vaults known to the server (index). */
-export async function listVaults(serverUrl: string): Promise<ListVaultsResult> {
-  try {
-    const res = await fetch(`${baseUrl(serverUrl)}/vaults`);
-    if (!res.ok) return { ok: false, message: `List vaults failed with status ${res.status}` };
-    const body = (await res.json()) as { vaults?: unknown };
-    if (!Array.isArray(body.vaults)) return { ok: false, message: 'List vaults response malformed' };
-    return { ok: true, vaults: body.vaults.filter((v): v is string => typeof v === 'string') };
-  } catch (error) {
-    return { ok: false, message: `List vaults failed: ${errorMessage(error)}` };
-  }
-}
-
 /** Rotates a device API key. */
 export async function rotateApiKey(params: {
   serverUrl: string;
