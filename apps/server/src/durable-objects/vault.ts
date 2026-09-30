@@ -172,6 +172,10 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/purge' && method === 'DELETE') {
+      const denied = await this.authorize(request, data);
+      if (denied) {
+        return denied;
+      }
       await this.state.storage.delete('vault');
       return new Response(null, { status: 204 });
     }
@@ -184,17 +188,6 @@ export class VaultDurableObject {
       return json({
         id: data.metadata.id,
         revision: data.snapshot.revision,
-      });
-    }
-
-    if (url.pathname === '/diagnostics' && method === 'GET') {
-      return json({
-        id: data.metadata.id,
-        revision: data.snapshot.revision,
-        logLength: data.log.operations.length,
-        assetCount: Object.keys(data.assets).length,
-        lastSyncAt: data.metadata.lastSyncAt ?? null,
-        connections: this.connections.size,
       });
     }
 
@@ -334,15 +327,18 @@ export class VaultDurableObject {
     const deviceMatch = url.pathname.match(/^\/devices\/([^/]+)/);
     if (deviceMatch) {
       const deviceId = deviceMatch[1];
-      const device = data.metadata.devices[deviceId];
 
-      if (!device) {
-        return json({ error: 'NOT_FOUND' }, 404);
-      }
-
+      // Authorize before looking the device up. Reporting 404 for an unknown
+      // device first would let an anonymous caller enumerate which device
+      // ids exist by comparing it against the 401 a known one returns.
       const denied = await this.authorize(request, data);
       if (denied) {
         return denied;
+      }
+
+      const device = data.metadata.devices[deviceId];
+      if (!device) {
+        return json({ error: 'NOT_FOUND' }, 404);
       }
 
       if (method === 'DELETE') {

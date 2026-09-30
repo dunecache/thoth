@@ -52,6 +52,20 @@ export function createRouter(env: Env) {
 
   const binding = env.VAULT_DO as unknown as VaultBinding | undefined;
 
+  /**
+   * Copies the client's headers onto an internal request.
+   *
+   * The object verifies the device credential from the Authorization header,
+   * so any branch that forwards a request without it makes a guarded route
+   * permanently unreachable: `/metadata` and `/purge` both did this, which
+   * left delete unauthenticated and GET /vaults/:id always 401. Every branch
+   * goes through here so a new one cannot reintroduce the gap.
+   */
+  const clientHeaders = (request: Request): Headers => {
+    const headers = new Headers(request.headers);
+    return headers;
+  };
+
   const stubFor = (name: string) => {
     if (!binding) {
       return null;
@@ -133,7 +147,9 @@ export function createRouter(env: Env) {
         if (url.pathname === `/vaults/${vaultId}` && request.method === 'GET') {
           const stub = stubFor(vaultId);
           if (stub) {
-            const res = await stub.fetch('https://internal/metadata');
+            const res = await stub.fetch('https://internal/metadata', {
+              headers: clientHeaders(request),
+            });
             if (res.ok) return addCors(res);
           }
           return addCors(
@@ -149,7 +165,14 @@ export function createRouter(env: Env) {
           request.method === 'DELETE'
         ) {
           const stub = stubFor(vaultId);
-          await stub?.fetch('https://internal/purge', { method: 'DELETE' });
+          const res = await stub?.fetch('https://internal/purge', {
+            method: 'DELETE',
+            headers: clientHeaders(request),
+          });
+          if (res && !res.ok) {
+            // Surface the object's refusal rather than a bare 204.
+            return addCors(res);
+          }
           return addCors(new Response(null, { status: 204 }));
         }
 
@@ -172,10 +195,10 @@ export function createRouter(env: Env) {
           }
           const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
           const body = hasBody ? await request.text() : undefined;
-          const headers = new Headers({ 'Content-Type': 'application/json' });
-          for (const [k, v] of request.headers.entries()) {
-            if (k.toLowerCase() !== 'content-type') headers.set(k, v);
-          }
+          // The object reads the credential, so Authorization must survive
+          // the Content-Type normalization below.
+          const headers = clientHeaders(request);
+          headers.set('Content-Type', 'application/json');
           const res = await stub.fetch(`https://internal${path}`, {
             method: request.method,
             body,
@@ -257,7 +280,7 @@ export function createRouter(env: Env) {
           const assetPath = url.pathname.replace(`/vaults/${vaultId}`, '');
           const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
           const body = hasBody ? await request.arrayBuffer() : undefined;
-          const headers = new Headers(request.headers);
+          const headers = clientHeaders(request);
           const res = await stub.fetch(`https://internal${assetPath}`, { method: request.method, headers, body });
           return addCors(res);
         }
@@ -270,7 +293,7 @@ export function createRouter(env: Env) {
             const hasBody =
               request.method !== 'GET' && request.method !== 'HEAD';
             const body = hasBody ? await request.text() : undefined;
-            const headers = new Headers(request.headers);
+            const headers = clientHeaders(request);
             if (hasBody) headers.set('Content-Type', 'application/json');
             const res = await deviceStub.fetch(`https://internal${devicePath}`, {
               method: request.method,
