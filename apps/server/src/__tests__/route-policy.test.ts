@@ -147,6 +147,32 @@ describe('every internal route is classified and enforced', () => {
       void apiKey;
     });
   }
+
+  it('refuses an unknown device before revealing that it is unknown', async () => {
+    // The table above only exercises registered device ids, so it cannot see
+    // this: the enumeration leak needs an id that is NOT registered.
+    //
+    // Answering 404 before authorizing would let an anonymous caller map a
+    // vault's devices by comparing 404 against the 401 a real device returns.
+    const { doObject } = await vaultWithDevice();
+    const unknown = '00000000-0000-4000-8000-000000000000';
+
+    const removeUnknown = await doObject.fetch(
+      internalRequest(`/devices/${unknown}`, 'DELETE')
+    );
+    const removeKnown = await doObject.fetch(
+      internalRequest(`/devices/${DEVICE_ID}`, 'DELETE')
+    );
+    const rotateUnknown = await doObject.fetch(
+      internalRequest(`/devices/${unknown}/rotate`, 'POST')
+    );
+
+    for (const res of [removeUnknown, removeKnown, rotateUnknown]) {
+      expect(res.status).toBe(401);
+    }
+    // Indistinguishable, so existence is not disclosed.
+    expect(removeUnknown.status).toBe(removeKnown.status);
+  });
 });
 
 describe('worker forwards credentials to the object', () => {
