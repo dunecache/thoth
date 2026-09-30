@@ -161,11 +161,53 @@ vi.mock('obsidian', () => {
     }
   }
 
+  /** Every element the tab built, so the markup can be inspected. */
+  const builtElements: Record<string, unknown>[] = [];
+
+  /** A minimal element: enough to record the markup the tab puts in it. */
+  function createElement(tag: string): Record<string, unknown> {
+    const children: Record<string, unknown>[] = [];
+    const el: Record<string, unknown> = {
+      tag,
+      children,
+      innerHTML: '',
+      style: {} as Record<string, string>,
+      cls: '',
+      text: '',
+      appendChild: (child: Record<string, unknown>) => {
+        children.push(child);
+      },
+      addClass: (c: string) => {
+        el.cls = c;
+      },
+      createEl: (_t: string, attrs?: Record<string, unknown>) => {
+        const child = createElement(_t);
+        if (attrs && typeof attrs === 'object') {
+          Object.assign(child, attrs);
+        }
+        children.push(child);
+        return child;
+      },
+      createDiv: (attrs?: Record<string, unknown>) => {
+        const child = createElement('div');
+        if (attrs && typeof attrs === 'object') {
+          Object.assign(child, attrs);
+        }
+        children.push(child);
+        return child;
+      },
+    };
+    builtElements.push(el);
+    return el;
+  }
+
   class PluginSettingTab {
-    containerEl = {
+    containerEl: Record<string, unknown> = {
       empty: () => undefined,
-      createEl: () => ({}),
-      createDiv: () => ({}),
+      createEl: (t: string, attrs?: Record<string, unknown>) =>
+        createElement(t) && Object.assign(createElement(t), attrs ?? {}),
+      createDiv: (attrs?: Record<string, unknown>) =>
+        Object.assign(createElement('div'), attrs ?? {}),
     };
     constructor(
       public app: unknown,
@@ -189,6 +231,7 @@ vi.mock('obsidian', () => {
   };
 
   return {
+    __builtElements: builtElements,
     Setting,
     PluginSettingTab,
     Notice,
@@ -201,6 +244,10 @@ vi.mock('obsidian', () => {
 
 const { ThothSettingTab } = await import('../settings-tab.js');
 const { DEFAULT_SETTINGS } = await import('../settings.js');
+const { qrSvg } = await import('../qr.js');
+const obsidianMock = (await import('obsidian')) as unknown as {
+  __builtElements: Record<string, unknown>[];
+};
 
 const VAULT_ID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
@@ -235,6 +282,9 @@ function createPlugin(overrides: Record<string, unknown> = {}) {
 
 function render(plugin: unknown): RecordedSetting[] {
   rendered.length = 0;
+  // The mock records every element it builds at module scope, so it has to be
+  // cleared or each render inherits the previous one's markup.
+  obsidianMock.__builtElements.length = 0;
   const tab = new ThothSettingTab({} as never, plugin as never);
   (tab as unknown as { display(): void }).display();
   return rendered;
@@ -334,7 +384,7 @@ describe('copying the invite link', () => {
 
     render(createPlugin());
     const copy = find('Invite another device')?.buttons.find(
-      (b) => b.label === 'Copy'
+      (b) => b.label === 'Copy link'
     );
     await copy?.handler?.();
 
@@ -354,9 +404,72 @@ describe('copying the invite link', () => {
 
     render(createPlugin());
     const invite = find('Invite another device');
-    await invite?.buttons.find((b) => b.label === 'Copy')?.handler?.();
+    await invite?.buttons.find((b) => b.label === 'Copy link')?.handler?.();
 
     expect(invite?.texts[0]?.inputEl.selected).toBe(true);
     expect(notices.some((n) => n.toLowerCase().includes('manually'))).toBe(true);
   });
 });
+
+describe('invite QR code', () => {
+  it('renders a QR code alongside the link', () => {
+    render(createPlugin());
+
+    // Scanning beats transcribing a 90-character link, and a phone is the
+    // device most likely to be setting itself up.
+    const svg = renderedContainerMarkup();
+    expect(svg).toContain('<svg');
+    expect(svg).toContain('viewBox="0 0');
+    expect(svg).toContain('aria-label="Thoth invite link"');
+  });
+
+  it('encodes exactly the link the field shows', () => {
+    render(createPlugin());
+
+    const link = find('Invite another device')?.texts[0]?.value ?? '';
+    const svg = renderedContainerMarkup();
+
+    // Encoding is deterministic, so the rendered markup must equal a fresh
+    // render of the same link. A mismatch would mean the code sends a device
+    // to a different vault than the one shown.
+    expect(svg).toBe(
+      qrSvg(link, {
+        size: 200,
+        color: '#000000',
+        background: '#ffffff',
+        label: 'Thoth invite link',
+      })
+    );
+  });
+
+  it('uses dark modules on a light field so it scans in a dark theme', () => {
+    render(createPlugin());
+
+    const svg = renderedContainerMarkup();
+    // currentColor would be near-white under a dark theme, giving white
+    // modules on the stylesheet's white backing: a code that looks correct and
+    // scans as nothing.
+    expect(svg).toContain('fill="#000000"');
+    expect(svg).not.toContain('currentColor');
+    expect(svg).toContain('fill="#ffffff"');
+  });
+
+  it('keeps the Copy button usable even if rendering the code fails', () => {
+    // The link and its button are rendered before the QR, so a failure there
+    // costs convenience rather than the ability to invite at all.
+    render(createPlugin());
+
+    const invite = find('Invite another device');
+    expect(invite?.buttons.some((b) => b.label === 'Copy link')).toBe(true);
+    expect(invite?.texts[0]?.value).toContain('vaultId=');
+  });
+});
+
+/** All markup the tab injected, concatenated for substring checks. */
+function renderedContainerMarkup(): string {
+  // Only elements the tab wrote markup into carry anything; the rest are
+  // structural nodes with no innerHTML.
+  return obsidianMock.__builtElements
+    .map((el) => (typeof el.innerHTML === 'string' ? el.innerHTML : ''))
+    .join('');
+}

@@ -7,6 +7,7 @@ import {
   validateServerUrl,
 } from './api.js';
 import { copyToClipboard } from './clipboard.js';
+import { qrSvg } from './qr.js';
 import type { ThothPlugin } from './main.js';
 import { pushRecentVaultId, withSetting, type ThothSettings } from './settings.js';
 import { defaultDeviceName } from './device-name.js';
@@ -159,7 +160,7 @@ export class ThothSettingTab extends PluginSettingTab {
           inviteField = text;
         })
         .addButton((btn) =>
-          btn.setButtonText('Copy').onClick(async () => {
+          btn.setButtonText('Copy link').onClick(async () => {
             const copied = await copyToClipboard(inviteLink);
             if (copied) {
               new Notice('✓ Invite link copied');
@@ -171,6 +172,32 @@ export class ThothSettingTab extends PluginSettingTab {
             new Notice('Copy the selected link manually');
           })
         );
+
+      // Scanning is far easier than transcribing a 90-character link, and a
+      // phone is the device most likely to be setting itself up. Rendered as
+      // SVG markup rather than a canvas so it themes with the vault and needs
+      // no DOM APIs.
+      try {
+        const qrHost = containerEl.createDiv({ cls: 'thoth-invite-qr' });
+        qrHost.createEl('p', {
+          text: 'Or scan this from the other device:',
+          cls: 'thoth-invite-qr-caption',
+        });
+        // Dark modules on a light field, stated explicitly. The default
+        // `currentColor` would be near-white in a dark theme, producing white
+        // modules on the white backing added by the stylesheet — a code that
+        // looks fine and scans as nothing.
+        qrHost.innerHTML = qrSvg(inviteLink, {
+          size: 200,
+          color: '#000000',
+          background: '#ffffff',
+          label: 'Thoth invite link',
+        });
+      } catch (error) {
+        // The link and its Copy button are above and remain usable, so a
+        // failure here costs convenience rather than the ability to invite.
+        console.warn('Thoth: could not render the invite QR code', error);
+      }
     }
 
     new Setting(containerEl)
