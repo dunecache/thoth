@@ -290,7 +290,11 @@ export class ThothSettingTab extends PluginSettingTab {
             )
             .setDisabled(!hasVault || !hasServer)
             .onClick(async () => {
-              await this.plugin.registerDevice();
+              // Goes through acquireCredential, which reclaims the stored
+              // device id. Registering afresh here would add a second device
+              // to the vault whenever this button was shown only because the
+              // device list had failed to load.
+              await this.plugin.registerOnCurrentVault();
               this.display();
             })
         );

@@ -546,3 +546,124 @@ describe('device id reclamation', () => {
     expect(requested).toEqual([DEVICE_ID]);
   });
 });
+
+/**
+ * Reclaiming versus duplicating a device.
+ *
+ * A vault caps its devices, so an id abandoned without being freed stays
+ * counted against that cap. The settings button used to register afresh, so
+ * it added a device every time it was clicked while the existing one was
+ * still registered — which happened whenever the device list had merely
+ * failed to load.
+ */
+describe('credential acquisition', () => {
+  /** Answers both the device list and registration. */
+  function stubVault(
+    devices: Array<{ id: string }>,
+    onRegister: (deviceId: string) => Response
+  ): { registrations: string[]; lists: number } {
+    const registrations: string[] = [];
+    let lists = 0;
+    stubFetch((url, init) => {
+      if (url.endsWith('/devices') && init?.method === 'POST') {
+        const raw = typeof init.body === 'string' ? init.body : '';
+        const body = JSON.parse(raw) as { deviceId: string };
+        registrations.push(body.deviceId);
+        return onRegister(body.deviceId);
+      }
+      if (url.endsWith('/devices')) {
+        lists += 1;
+        return jsonResponse(200, { devices });
+      }
+      return jsonResponse(401, REVOKED);
+    });
+    return {
+      get registrations() {
+        return registrations;
+      },
+      get lists() {
+        return lists;
+      },
+    } as { registrations: string[]; lists: number };
+  }
+
+  it('does nothing when the stored credential still works', async () => {
+    // The decisive case: the device is registered and the key is valid, so
+    // registering again would fail with a conflict or, before the server
+    // reported that, silently add a second device.
+    const vault = stubVault(
+      [{ id: DEVICE_ID }],
+      () => jsonResponse(201, { deviceId: 'unused', apiKey: 'k' })
+    );
+    await boot();
+
+    await plugin.registerOnCurrentVault();
+
+    expect(vault.registrations).toEqual([]);
+    expect(vault.lists).toBe(1);
+  });
+
+  it('reclaims the stored id once the device has been removed', async () => {
+    // Revoked: the list 401s, so the id cannot be confirmed free, and is
+    // tried anyway — which is what makes it reusable rather than duplicated.
+    const vault = stubVault([], (deviceId) =>
+      jsonResponse(201, { deviceId, apiKey: 'fresh-key' })
+    );
+    await boot();
+
+    await plugin.registerOnCurrentVault();
+
+    expect(vault.registrations).toEqual([DEVICE_ID]);
+    expect(plugin.settings.deviceId).toBe(DEVICE_ID);
+  });
+
+  it('falls back to a new id only when the old one is occupied', async () => {
+    const vault = stubVault(
+      [],
+      (deviceId) =>
+        deviceId === DEVICE_ID
+          ? jsonResponse(409, {
+              error: 'DEVICE_ALREADY_REGISTERED',
+              message: 'this device id is already registered on the vault',
+            })
+          : jsonResponse(201, { deviceId, apiKey: 'fresh-key' })
+    );
+    await boot();
+
+    await plugin.registerOnCurrentVault();
+
+    expect(vault.registrations).toHaveLength(2);
+    expect(vault.registrations[0]).toBe(DEVICE_ID);
+    expect(vault.registrations[1]).not.toBe(DEVICE_ID);
+  });
+
+  it('registers afresh when this device was never on the vault', async () => {
+    const vault = stubVault([], (deviceId) =>
+      jsonResponse(201, { deviceId, apiKey: 'fresh-key' })
+    );
+    await boot();
+    // No stored credentials: a different vault, or a first-time setup.
+    Object.assign(plugin.settings, { deviceId: '', apiKey: '' });
+
+    await plugin.registerOnCurrentVault();
+
+    expect(vault.registrations).toHaveLength(1);
+    expect(vault.registrations[0]).not.toBe('');
+  });
+
+  it('clears a recorded revocation once the credential is confirmed good', async () => {
+    stubVault([{ id: DEVICE_ID }], () =>
+      jsonResponse(201, { deviceId: 'unused', apiKey: 'k' })
+    );
+    await boot();
+    const sync = (plugin as unknown as { performSync(): Promise<string> }).performSync.bind(plugin);
+    await sync();
+    expect(plugin.authFailure).toBeDefined();
+
+    await plugin.registerOnCurrentVault();
+
+    // The key still works, so the halt was stale and must be lifted rather
+    // than leaving sync stopped.
+    expect(plugin.authFailure).toBeUndefined();
+  });
+});

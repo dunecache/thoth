@@ -270,9 +270,9 @@ function createPlugin(overrides: Record<string, unknown> = {}) {
     deviceListError: undefined,
     async refreshDeviceList() {},
     async saveSettings() {},
-    async registerDevice() {
-      return true;
-    },
+    // Both are spies: the S3 button must go through the reclaiming path.
+    registerDevice: vi.fn(async () => ({ ok: true as const })),
+    registerOnCurrentVault: vi.fn(async () => {}),
     async createVault() {},
     async checkConnection() {},
     async rotateApiKey() {},
@@ -473,3 +473,50 @@ function renderedContainerMarkup(): string {
     .map((el) => (typeof el.innerHTML === 'string' ? el.innerHTML : ''))
     .join('');
 }
+
+describe('device registration from S3', () => {
+  it('reclaims the stored device id rather than adding a second device', async () => {
+    const plugin = createPlugin({ deviceId: '', apiKey: '' });
+    render(plugin);
+
+    const register = find('Register device');
+    await register?.buttons[0]?.handler?.();
+
+    // Registering afresh here would add another device to the vault whenever
+    // this button appeared only because the device list had failed to load,
+    // and a vault caps how many devices it holds.
+    const stub = plugin as unknown as {
+      registerOnCurrentVault: ReturnType<typeof vi.fn>;
+      registerDevice: ReturnType<typeof vi.fn>;
+    };
+    expect(stub.registerOnCurrentVault).toHaveBeenCalledTimes(1);
+    expect(stub.registerDevice).not.toHaveBeenCalled();
+  });
+
+  it('offers re-registration when the credential was rejected', () => {
+    const plugin = createPlugin();
+    (plugin as unknown as { authFailure?: unknown }).authFailure = {
+      reason: 'this device is no longer registered on the vault',
+      at: Date.now(),
+    };
+    render(plugin);
+
+    const register = find('Register device');
+    expect(register?.buttons[0]?.label).toBe('Register this device again');
+  });
+
+  it('explains that the device was removed rather than showing a bare button', () => {
+    const plugin = createPlugin();
+    (plugin as unknown as { authFailure?: unknown }).authFailure = {
+      reason: 'this device is no longer registered on the vault',
+      at: Date.now(),
+    };
+    render(plugin);
+
+    const notice = find('This device was removed');
+    expect(notice).toBeDefined();
+    // The user may be holding unsynced work; saying so avoids them assuming
+    // the button will discard it.
+    expect(notice?.desc).toMatch(/unsynced changes are kept/i);
+  });
+});

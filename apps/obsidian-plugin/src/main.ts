@@ -103,7 +103,7 @@ type SyncOutcome = 'success' | 'skipped' | 'retry' | 'halt';
 
 /** Why a registration attempt did not produce a usable credential. */
 export type RegisterOutcome =
-  | { ok: true }
+  | { ok: true; alreadyRegistered?: true }
   | {
       ok: false;
       reason: 'NO_TARGET' | 'REJECTED';
@@ -425,8 +425,70 @@ export class ThothPlugin extends Plugin {
    *   locked the user out entirely. After a revocation the id is normally
    *   free again, and reusing it costs nothing.
    */
+  /**
+   * Whether the stored credential is still good on the current vault.
+   *
+   * Answers the question registration cannot: an id that is already
+   * registered tells us nothing about whether *our key* still works, and
+   * re-registering to find out would add a device. One authenticated read
+   * settles it.
+   */
+  private async isStillRegistered(): Promise<boolean> {
+    const { serverUrl, vaultId, deviceId, apiKey } = this.settings;
+    if (!serverUrl || !vaultId || !deviceId || !apiKey) {
+      return false;
+    }
+    const res = await listDevices({ serverUrl, vaultId, apiKey });
+    return res.ok && res.devices.some((d) => d.id === deviceId);
+  }
+
+  /**
+   * Obtains a working credential for the current vault, preferring to
+   * reclaim the device id already held.
+   *
+   * Shared by the recovery command and the settings button, because they
+   * failed differently when they each had their own copy: the command leaked a
+   * device slot on every recovery, and the button added a second device
+   * whenever the list merely failed to load while the existing device was
+   * perfectly fine.
+   *
+   * Reclaiming matters because a vault caps its devices, and every id that is
+   * abandoned without being freed stays counted against that cap.
+   */
+  private async acquireCredential(): Promise<RegisterOutcome> {
+    const previousId = this.settings.deviceId?.trim();
+    if (previousId && (await this.isStillRegistered())) {
+      return { ok: true, alreadyRegistered: true };
+    }
+    let outcome = await this.registerDevice(previousId);
+    if (!outcome.ok && outcome.code === 'DEVICE_ALREADY_REGISTERED') {
+      // The id is genuinely occupied, so it cannot be reclaimed. The stored
+      // key did not authenticate the check above, so it cannot free the entry
+      // either; a new id is the only route, and it does cost a slot.
+      console.warn(
+        'Thoth: previous device id is still occupied, registering a new one'
+      );
+      outcome = await this.registerDevice();
+    }
+    return outcome;
+  }
+
+  /**
+   * Registers this device on the current vault from the settings button.
+   *
+   * Shares `acquireCredential` with the recovery command so neither can
+   * register a duplicate device.
+   */
+  async registerOnCurrentVault(): Promise<void> {
+    const outcome = await this.acquireCredential();
+    if (outcome.ok && outcome.alreadyRegistered) {
+      this.clearAuthFailure();
+      new Notice('Thoth: this device is already registered on the vault');
+    }
+  }
+
   async reauthenticate(): Promise<void> {
-    const { serverUrl, vaultId, deviceId: previousId } = this.settings;
+    const { serverUrl, vaultId } = this.settings;
     if (!serverUrl || !vaultId) {
       new Notice('Thoth: server URL and vault ID are required');
       return;
@@ -437,15 +499,7 @@ export class ThothPlugin extends Plugin {
     this.realtimeClient = undefined;
     this.realtimeStatus = 'closed';
 
-    let outcome = await this.registerDevice(previousId);
-
-    if (!outcome.ok && outcome.code === 'DEVICE_ALREADY_REGISTERED') {
-      // The id is still held, which means the credential was rotated rather
-      // than the device removed. The old key cannot authorise deleting it, so
-      // fall back to a new id and say so, since that does cost a slot.
-      console.warn('Thoth: previous device id is still in use, using a new one');
-      outcome = await this.registerDevice();
-    }
+    const outcome = await this.acquireCredential();
 
     if (!outcome.ok) {
       if (outcome.code === 'DEVICE_LIMIT_REACHED') {
