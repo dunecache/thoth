@@ -16,6 +16,7 @@ interface RecordedText {
   disabled: boolean;
   inputEl: {
     style: Record<string, string>;
+    readOnly: boolean;
     select: () => void;
     selected: boolean;
     addEventListener: (...args: unknown[]) => void;
@@ -49,8 +50,15 @@ vi.mock('obsidian', () => {
     changeHandler: ((value: string) => void) | null = null;
     inputEl = {
       style: {} as Record<string, string>,
+      readOnly: false,
       selected: false,
+      // A disabled input is not focusable, so a real browser makes select() a
+      // no-op. Modelling that is what stops a test from passing on a fallback
+      // that cannot actually work.
       select: () => {
+        if (this.disabled) {
+          return;
+        }
         this.inputEl.selected = true;
       },
       addEventListener: () => undefined,
@@ -262,8 +270,21 @@ describe('invite link', () => {
     render(createPlugin());
 
     const invite = find('Invite another device');
-    expect(invite?.texts[0]?.disabled).toBe(true);
+    expect(invite?.texts[0]?.inputEl.readOnly).toBe(true);
     expect(invite?.desc).toMatch(/no credential/i);
+  });
+
+  it('leaves the link selectable so it can be copied by hand', () => {
+    render(createPlugin());
+
+    const invite = find('Invite another device');
+    // readOnly rather than disabled: a disabled input cannot be focused, so
+    // the clipboard fallback would select nothing and tell the user to copy
+    // a field they cannot select.
+    expect(invite?.texts[0]?.disabled).toBe(false);
+
+    invite?.texts[0]?.inputEl.select();
+    expect(invite?.texts[0]?.inputEl.selected).toBe(true);
   });
 
   it('never puts the API key in the link', () => {

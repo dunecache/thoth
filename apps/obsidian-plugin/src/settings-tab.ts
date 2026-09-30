@@ -150,7 +150,11 @@ export class ThothSettingTab extends PluginSettingTab {
         )
         .addText((text) => {
           text.setValue(inviteLink);
-          text.setDisabled(true);
+          // readOnly, not disabled. A disabled input cannot be focused or
+          // selected, so the clipboard fallback below would have nothing to
+          // select — leaving the user told to copy a field that cannot be
+          // copied from.
+          text.inputEl.readOnly = true;
           text.inputEl.style.minWidth = '260px';
           inviteField = text;
         })

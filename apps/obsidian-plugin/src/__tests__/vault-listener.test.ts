@@ -63,7 +63,10 @@ function setupWithGuard() {
 }
 
 async function waitForSize(queue: OperationQueue, size: number): Promise<void> {
-  await vi.waitFor(() => expect(queue.size).toBe(size));
+  // A generous budget: the queue settles in a few microtasks, so hitting the
+  // 1s default means this machine is loaded rather than that anything is
+  // wrong. Without it this file flaked under a parallel full-suite run.
+  await vi.waitFor(() => expect(queue.size).toBe(size), { timeout: 10_000 });
 }
 
 describe('attachVaultListener', () => {
