@@ -246,3 +246,87 @@ describe('re-authentication', () => {
     expect(plugin.activeRealtimeClient).toBeDefined();
   });
 });
+
+/**
+ * The seam between performSync and RetryScheduler.
+ *
+ * Every other suite here calls performSync directly, so it observes the
+ * return value but not what the scheduler does with it. An adapter in the
+ * wiring collapsed all four outcomes to 'success' and every one of those
+ * tests still passed. These drive the real loop.
+ */
+describe('scheduler wiring', () => {
+  const tick = async (ms: number): Promise<void> => {
+    await vi.advanceTimersByTimeAsync(ms);
+  };
+
+  it('stops the loop when a cycle halts', async () => {
+    vi.useFakeTimers();
+    stubFetch(() => jsonResponse(401, REVOKED));
+    await boot();
+
+    const scheduler = (
+      plugin as unknown as { createScheduler(): { start(): void; stop(): void } }
+    ).createScheduler();
+    scheduler.start();
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Let the armed timer fire and the cycle observe the 401.
+    await tick(60_000);
+
+    // A halt arms nothing, so the loop is genuinely stopped rather than
+    // merely reporting the right string.
+    expect(vi.getTimerCount()).toBe(0);
+    scheduler.stop();
+  });
+
+  it('backs off after a transient failure', async () => {
+    vi.useFakeTimers();
+    stubFetch(() => jsonResponse(500, { error: 'INTERNAL_ERROR', message: 'boom' }));
+    await boot();
+
+    const scheduler = (
+      plugin as unknown as { createScheduler(): { start(): void; stop(): void } }
+    ).createScheduler();
+    scheduler.start();
+
+    // First run fails and doubles the interval to 120s.
+    await tick(60_000);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Still nothing at 61s: the backoff took effect.
+    await tick(1_000);
+    expect(vi.getTimerCount()).toBe(1);
+
+    scheduler.stop();
+  });
+
+  it('keeps the base interval after a successful cycle', async () => {
+    vi.useFakeTimers();
+    let attempt = 0;
+    stubFetch(() => {
+      attempt += 1;
+      // Fail once so the delay has grown, then succeed.
+      if (attempt === 1) {
+        return jsonResponse(500, { error: 'INTERNAL_ERROR', message: 'boom' });
+      }
+      return jsonResponse(200, { revision: 5, operations: [] });
+    });
+    await boot();
+
+    const scheduler = (
+      plugin as unknown as { createScheduler(): { start(): void; stop(): void } }
+    ).createScheduler();
+    scheduler.start();
+
+    await tick(60_000);
+    expect(vi.getTimerCount()).toBe(1);
+
+    // A success resets the delay, so the next run is due at the base 60s
+    // rather than the 120s the backoff had reached.
+    await tick(60_001);
+    expect(vi.getTimerCount()).toBe(1);
+
+    scheduler.stop();
+  });
+});

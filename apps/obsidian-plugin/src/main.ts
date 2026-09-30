@@ -191,13 +191,7 @@ export class ThothPlugin extends Plugin {
       },
     });
 
-    this.scheduler = new RetryScheduler({
-      // performSync reports a boolean today; translate it into the outcome
-      // vocabulary so a false result still drives the backoff.
-      task: async () => ((await this.performSync()) ? 'success' : 'retry'),
-      baseIntervalMs: 60_000,
-      maxDelayMs: 600_000,
-    });
+    this.scheduler = this.createScheduler();
     this.scheduler.start();
 
     this.statusBarEl = this.addStatusBarItem();
@@ -822,6 +816,28 @@ export class ThothPlugin extends Plugin {
    * being polled at the full interval — previously every error was swallowed
    * here and the backoff never engaged.
    */
+  /**
+   * Builds the periodic sync loop.
+   *
+   * Extracted so the wiring between performSync and the scheduler is
+   * testable. That seam is where a lossy adapter once hid: performSync
+   * returns a TaskOutcome directly, and an earlier version coerced it with
+   * `? 'success' : 'retry'`, which collapsed every outcome — 'halt' and
+   * 'retry' included — to 'success'. The backoff and the auth halt then
+   * never took effect, while both sides' unit tests still passed.
+   *
+   * Do not reintroduce an adapter here. The two vocabularies are identical,
+   * so passing performSync straight through is the only form that keeps the
+   * compiler in the loop.
+   */
+  private createScheduler(): RetryScheduler {
+    return new RetryScheduler({
+      task: () => this.performSync(),
+      baseIntervalMs: 60_000,
+      maxDelayMs: 600_000,
+    });
+  }
+
   /**
    * Records that the server rejected this device's credential and tells the
    * user once.
