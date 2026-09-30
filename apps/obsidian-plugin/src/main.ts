@@ -70,6 +70,30 @@ export interface AuthFailure {
 }
 
 /**
+ * A non-auth sync failure that has persisted long enough to be worth telling
+ * the user about.
+ *
+ * Distinct from `AuthFailure` because the response differs: a rejected
+ * credential cannot be retried at all, whereas a server error is still being
+ * retried on a backoff and only needs to become visible.
+ */
+export interface SyncFailure {
+  /** The server's explanation, or a local summary. */
+  reason: string;
+  /** Consecutive failed cycles, so a single blip stays quiet. */
+  count: number;
+  at: number;
+}
+
+/**
+ * Consecutive failed cycles before the user is told.
+ *
+ * One dropped request is not news, and a Notice for each would be spam on a
+ * flaky connection. Three cycles is roughly two minutes at the base interval.
+ */
+const FAILURE_NOTICE_THRESHOLD = 3;
+
+/**
  * What one sync cycle concluded, in the scheduler's vocabulary.
  *
  * `halt` is the important one: a rejected credential cannot be fixed by
@@ -101,6 +125,12 @@ export class ThothPlugin extends Plugin {
   authFailure?: AuthFailure;
   /** Guards the one-shot Notice so a halted loop cannot spam the user. */
   private hasWarnedAboutAuth = false;
+  /** Set when a non-auth failure has lasted long enough to report. */
+  syncFailure?: SyncFailure;
+  /** Consecutive failed cycles, reset by any success. */
+  private consecutiveFailures = 0;
+  /** Guards the one-shot Notice for sustained failures. */
+  private hasWarnedAboutFailure = false;
   private detachVaultListener?: () => void;
   private scheduler?: RetryScheduler;
   private isSyncing = false;
@@ -670,7 +700,21 @@ export class ThothPlugin extends Plugin {
         vaultId: this.settings.vaultId,
         apiKey: this.settings.apiKey,
       });
-      if (!snap.ok || !snap.assets) return;
+      if (!snap.ok) {
+        // A revocation is reported because it needs the user. Ordinary
+        // failures are not: this is best-effort background work running at
+        // the end of a cycle whose own download already saw the same outage,
+        // so recording it here would count one incident twice.
+        if (snap.unauthorized) {
+          this.recordAuthFailure(snap.error);
+        } else {
+          console.debug('Thoth: background asset snapshot unavailable', {
+            error: snap.error,
+          });
+        }
+        return;
+      }
+      if (!snap.assets) return;
       const adapter = this.createVaultAdapter();
       let downloaded = 0;
       for (const [path, meta] of Object.entries(snap.assets)) {
@@ -742,6 +786,13 @@ export class ThothPlugin extends Plugin {
     if (health && !health.ok) {
       this.statusBarEl.textContent = `Thoth: ✗ ${health.message.slice(0, 24)}`;
       this.statusBarEl.title = health.message;
+      return;
+    }
+    if (this.syncFailure) {
+      this.statusBarEl.textContent = `Thoth: ⚠ retrying (${this.syncFailure.count})`;
+      this.statusBarEl.title =
+        `Sync is failing: ${this.syncFailure.reason}\n\n` +
+        'Changes are queued locally and will upload once the server recovers.';
       return;
     }
     if (this.isPaused) {
@@ -859,6 +910,39 @@ export class ThothPlugin extends Plugin {
     this.updateStatusBar();
   }
 
+  /**
+   * Records a retryable failure and tells the user once it has persisted.
+   *
+   * Unlike a rejected credential, these keep being retried, so nothing is
+   * halted — the point is only that a server which has been failing for
+   * several cycles stops looking like a healthy idle client.
+   */
+  private recordSyncFailure(reason: string): void {
+    this.consecutiveFailures += 1;
+    this.syncFailure = {
+      reason,
+      count: this.consecutiveFailures,
+      at: Date.now(),
+    };
+    if (
+      this.consecutiveFailures === FAILURE_NOTICE_THRESHOLD &&
+      !this.hasWarnedAboutFailure
+    ) {
+      this.hasWarnedAboutFailure = true;
+      new Notice(
+        `Thoth: sync is failing (${reason}). Changes are queued locally and will upload once the server recovers.`
+      );
+    }
+    this.updateStatusBar();
+  }
+
+  /** Clears a recorded retryable failure after a successful cycle. */
+  private clearSyncFailure(): void {
+    this.consecutiveFailures = 0;
+    this.syncFailure = undefined;
+    this.hasWarnedAboutFailure = false;
+  }
+
   /** Clears the revoked-credential state once a valid credential is in use. */
   private clearAuthFailure(): void {
     this.authFailure = undefined;
@@ -886,6 +970,21 @@ export class ThothPlugin extends Plugin {
     this.applyGuard.reset();
     this.updateStatusBar();
     let syncSucceeded = false;
+    // A cycle can reach several failure branches (a failed download, then a
+    // held-back batch). Counting each would inflate the streak and fire the
+    // threshold early, so the cycle records at most one failure.
+    let failureRecorded = false;
+    // A cycle can reach several failure branches — a failed download, then a
+    // failed refresh, then a held-back batch — and they usually describe the
+    // same incident. Counting each would inflate the streak and fire the
+    // threshold early, so the first reason recorded is the one reported.
+    const noteFailure = (reason: string): void => {
+      if (failureRecorded) {
+        return;
+      }
+      failureRecorded = true;
+      this.recordSyncFailure(reason);
+    };
     try {
       if (
         !this.settings.serverUrl ||
@@ -966,6 +1065,7 @@ export class ThothPlugin extends Plugin {
         console.warn('Thoth: download failed, will retry on next sync', {
           error: downloadResult.error,
         });
+        noteFailure(downloadResult.error);
       }
 
       // Upload queued operations after pulling latest state
@@ -979,11 +1079,21 @@ export class ThothPlugin extends Plugin {
           apiKey: this.settings.apiKey,
           sinceRevision: this.serverRevision,
         });
-        if (!latest.ok && latest.unauthorized) {
-          this.recordAuthFailure(latest.error);
-          return 'halt';
+        if (!latest.ok) {
+          if (latest.unauthorized) {
+            this.recordAuthFailure(latest.error);
+            return 'halt';
+          }
+          // Pushing on against a revision the server may have moved past
+          // would earn a conflict and explain nothing, so stop here and let
+          // the backoff retry the whole cycle.
+          console.warn('Thoth: could not refresh before push', {
+            error: latest.error,
+          });
+          noteFailure(latest.error);
+          break;
         }
-        if (latest.ok && latest.revision > this.serverRevision) {
+        if (latest.revision > this.serverRevision) {
           // Apply any newly pulled operations to the local vault first
           const adapter = this.createVaultAdapter();
           const fetchAsset = async (assetId: string): Promise<ArrayBuffer | null> => {
@@ -1018,6 +1128,9 @@ export class ThothPlugin extends Plugin {
           console.warn('Thoth: batch held back, will retry', {
             reason: prepared.reason,
           });
+          noteFailure(
+            prepared.detail ?? `cannot send a pending asset (${prepared.reason})`
+          );
           break;
         }
         const batch = prepared.operations;
@@ -1037,6 +1150,7 @@ export class ThothPlugin extends Plugin {
             error: uploadResult.error,
             baseRevision,
           });
+          noteFailure(uploadResult.error);
           break;
         }
         const newRevision = uploadResult.newRevision;
@@ -1062,14 +1176,21 @@ export class ThothPlugin extends Plugin {
       // Background asset synchronization
       await this.syncAssets();
       if (syncSucceeded) {
-        // A completed cycle proves the credential works, so any recorded
-        // revocation is stale.
+        // A completed cycle proves the credential works and the server is
+        // reachable, so both recorded failure states are stale.
         this.clearAuthFailure();
+        this.clearSyncFailure();
         return 'success';
       }
+      // Names a reason even when no branch reported one, so a swallowed
+      // failure still counts.
+      noteFailure('the server did not complete the sync');
       return 'retry';
     } catch (error) {
       console.error('Thoth: sync failed with exception', error);
+      noteFailure(
+        error instanceof Error ? error.message : String(error)
+      );
       return 'retry';
     } finally {
       this.isSyncing = false;
@@ -1170,6 +1291,12 @@ export class ThothPlugin extends Plugin {
     });
     if (!snapshotResult.ok) {
       console.warn('Thoth: snapshot restore failed', { error: snapshotResult.error });
+      // A revocation found here is the same one the pull below would report;
+      // recording it immediately means a device whose first request is a
+      // snapshot does not have to reach a later call to learn about it.
+      if (snapshotResult.unauthorized) {
+        this.recordAuthFailure(snapshotResult.error);
+      }
       return null;
     }
     const assets = snapshotResult.assets ?? {};

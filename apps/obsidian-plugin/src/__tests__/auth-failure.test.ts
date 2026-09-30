@@ -330,3 +330,111 @@ describe('scheduler wiring', () => {
     scheduler.stop();
   });
 });
+
+/**
+ * Retryable failures.
+ *
+ * These keep being retried, so nothing is halted — the requirement is only
+ * that a server failing for several cycles stops looking like a healthy idle
+ * client, and that a single dropped request stays quiet.
+ */
+describe('sustained failures', () => {
+  const FAILING = () => jsonResponse(500, { error: 'INTERNAL_ERROR', message: 'boom' });
+
+  const sync = () =>
+    (plugin as unknown as { performSync(): Promise<string> }).performSync();
+
+  it('stays quiet below the threshold', async () => {
+    stubFetch(FAILING);
+    await boot();
+
+    await sync();
+
+    expect(plugin.syncFailure?.count).toBe(1);
+    // A single blip must not interrupt the user.
+    expect(notices.some((n) => n.includes('sync is failing'))).toBe(false);
+  });
+
+  it('tells the user once the failure has persisted', async () => {
+    stubFetch(FAILING);
+    await boot();
+
+    await sync();
+    await sync();
+    await sync();
+    await sync();
+
+    expect(plugin.syncFailure?.count).toBeGreaterThanOrEqual(3);
+    expect(
+      notices.filter((n) => n.includes('sync is failing')).length,
+      'the notice must fire exactly once, not per cycle'
+    ).toBe(1);
+  });
+
+  it('counts a cycle at most once however many branches fail', async () => {
+    // A failed download followed by a held-back batch must not advance the
+    // streak twice, or the threshold fires early.
+    stubFetch(FAILING);
+    await boot();
+    await plugin.queue.enqueue(
+      {
+        type: 'add-asset',
+        payload: { path: 'img/a.png', assetId: 'a', hash: 'h', size: 1 },
+      },
+      DEVICE_ID
+    );
+
+    await sync();
+
+    expect(plugin.syncFailure?.count).toBe(1);
+  });
+
+  it('shows a retrying status with the failure count', async () => {
+    stubFetch(FAILING);
+    await boot();
+
+    await sync();
+    (plugin as unknown as { updateStatusBar(): void }).updateStatusBar();
+
+    expect(statusEl.textContent).toContain('retrying (1)');
+    expect(statusEl.title).toContain('boom');
+  });
+
+  it('clears the failure after a successful cycle', async () => {
+    let failing = true;
+    stubFetch(() => (failing ? FAILING() : jsonResponse(200, { revision: 5, operations: [] })));
+    await boot();
+
+    await sync();
+    await sync();
+    expect(plugin.syncFailure).toBeDefined();
+
+    failing = false;
+    await sync();
+
+    expect(plugin.syncFailure).toBeUndefined();
+    (plugin as unknown as { updateStatusBar(): void }).updateStatusBar();
+    expect(statusEl.textContent).not.toContain('retrying');
+  });
+
+  it('keeps retrying rather than halting', async () => {
+    stubFetch(FAILING);
+    await boot();
+
+    // A server error is transient: it must keep being retried.
+    expect(await sync()).toBe('retry');
+    expect(await sync()).toBe('retry');
+    expect(plugin.authFailure).toBeUndefined();
+  });
+
+  it('counts an exception as a failure', async () => {
+    stubFetch(() => {
+      throw new Error('socket exploded');
+    });
+    await boot();
+
+    await sync();
+
+    expect(plugin.syncFailure?.reason).toContain('socket exploded');
+  });
+});
