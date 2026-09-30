@@ -1,5 +1,52 @@
 import { describe, it, expect } from 'vitest';
+
+import type { DurableObjectNamespace, DurableObjectState } from '@cloudflare/workers-types';
+
+import { VaultDurableObject } from '../durable-objects/vault.js';
 import { createRouter } from '../routes/router.js';
+
+class FakeStorage {
+  private readonly map = new Map<string, unknown>();
+  get<T>(key: string): T | undefined {
+    return this.map.get(key) as T | undefined;
+  }
+  put(key: string, value: unknown): void {
+    this.map.set(key, value);
+  }
+  delete(key: string): void {
+    this.map.delete(key);
+  }
+  list(opts?: { prefix?: string }) {
+    const prefix = opts?.prefix ?? '';
+    const entries = new Map<string, unknown>();
+    for (const [k, v] of this.map.entries()) {
+      if (k.startsWith(prefix)) entries.set(k, v);
+    }
+    return entries;
+  }
+}
+
+/** One object per name, so the shared creation chokepoint is shared. */
+function fakeBinding(): DurableObjectNamespace {
+  const objects = new Map<string, VaultDurableObject>();
+  return {
+    idFromName: (name: string) => name,
+    get: (id: unknown) => {
+      const name = String(id);
+      let object = objects.get(name);
+      if (!object) {
+        object = new VaultDurableObject({
+          storage: new FakeStorage(),
+        } as unknown as DurableObjectState);
+        objects.set(name, object);
+      }
+      return {
+        fetch: (input: unknown, init?: RequestInit) =>
+          object?.fetch(new Request(input as string, init)) as Promise<Response>,
+      };
+    },
+  } as unknown as DurableObjectNamespace;
+}
 
 describe('router', () => {
   it('GET /health returns ok', async () => {
@@ -30,13 +77,27 @@ describe('router', () => {
   });
 
   it('POST /vaults creates vault', async () => {
-    const router = createRouter({ VERSION: '0.1.0', ENVIRONMENT: 'test' });
+    // Storage must be configured: answering 201 while provisioning nothing
+    // told the client a vault existed that did not.
+    const router = createRouter({
+      VERSION: '0.1.0',
+      ENVIRONMENT: 'test',
+      VAULT_DO: fakeBinding(),
+    });
     const req = new Request('http://localhost/vaults', { method: 'POST' });
     const res = await router(req);
     expect(res.status).toBe(201);
     const json = (await res.json()) as { id: string; revision: number };
     expect(json).toHaveProperty('id');
     expect(json.revision).toBe(0);
+  });
+
+  it('POST /vaults reports 503 when storage is not configured', async () => {
+    const router = createRouter({ VERSION: '0.1.0', ENVIRONMENT: 'test' });
+    const res = await router(
+      new Request('http://localhost/vaults', { method: 'POST' })
+    );
+    expect(res.status).toBe(503);
   });
 
   it('GET /vaults/:id returns metadata', async () => {

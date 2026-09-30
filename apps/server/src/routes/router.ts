@@ -98,21 +98,50 @@ export function createRouter(env: Env) {
       }
 
       if (url.pathname === '/vaults' && request.method === 'POST') {
+        // Creation is the one unauthenticated route that provisions a durable
+        // object, so it is the one route that must not answer 201 while doing
+        // nothing.
+        if (!binding) {
+          return addCors(
+            handleError(
+              new HttpError(
+                503,
+                'INTERNAL_ERROR',
+                'Vault storage is not configured'
+              )
+            )
+          );
+        }
+        const headers = clientHeaders(request);
+        headers.set('Content-Type', 'application/json');
+
+        // Reserve before provisioning. The limit lives in the shared index
+        // object, so checking it first is what stops a caller minting durable
+        // objects faster than it can be refused — and it means a refused
+        // request leaves nothing behind to clean up.
+        const reserved = await stubFor(VAULT_INDEX_NAME)?.fetch(
+          'https://internal/index/reserve',
+          { method: 'POST', headers, body: JSON.stringify({}) }
+        );
+        if (!reserved?.ok) {
+          return addCors(
+            reserved ??
+              new Response(JSON.stringify({ error: 'NOT_CONFIGURED' }), {
+                status: 503,
+              })
+          );
+        }
+
         const id = crypto.randomUUID();
-        {
-          const stub = stubFor(id);
-          await stub?.fetch('https://internal/init', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id }),
-          });
-          // Index for GET /vaults
-          const indexStub = stubFor(VAULT_INDEX_NAME);
-          await indexStub?.fetch('https://internal/index/add', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id }),
-          });
+        const init = await stubFor(id)?.fetch('https://internal/init', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ id }),
+        });
+        if (!init?.ok) {
+          return addCors(
+            init ?? new Response(JSON.stringify({ error: 'NOT_CONFIGURED' }), { status: 503 })
+          );
         }
         return addCors(
           new Response(JSON.stringify({ id, revision: 0 }), {

@@ -54,11 +54,35 @@ function assetBlobKey(hash: string): string {
   return `asset-blob:${hash}`;
 }
 
-/** Requests allowed per client IP within one window. */
-const RATE_LIMIT_MAX_REQUESTS = 600;
+/**
+ * Per-IP request budgets, by route class.
+ *
+ * Sync traffic is generous because a client polls every 60-300s and pages
+ * through its history. Creation is not: it is unauthenticated, and each call
+ * mints a Durable Object that persists until someone deletes it. Bounding
+ * only the general budget left creation at the same 600/min as ordinary
+ * polling, which on the free tier is hundreds of durable objects per minute
+ * per address.
+ */
+const RATE_LIMIT_MAX_REQUESTS = 120;
+const RATE_LIMIT_MAX_CREATIONS = 5;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 /** Distinct client IPs tracked before the in-memory budget is reset. */
 const RATE_LIMIT_MAX_CLIENTS = 1000;
+
+/**
+ * Routes that provision durable objects, and so get the tight budget.
+ *
+ * The websocket handshake is excluded: it is one request per connection, not
+ * a poll, and counting it only penalises a client for reconnecting.
+ */
+const CREATION_ROUTES = new Set(['/index/reserve']);
+
+function rateLimitFor(pathname: string): number {
+  return CREATION_ROUTES.has(pathname)
+    ? RATE_LIMIT_MAX_CREATIONS
+    : RATE_LIMIT_MAX_REQUESTS;
+}
 
 /**
  * The hibernation WebSocket surface of DurableObjectState.
@@ -192,17 +216,13 @@ export class VaultDurableObject {
     }
 
     // Vault index for GET /vaults (stored in DO id _vault-index)
-    if (url.pathname === '/index/add' && method === 'POST') {
-      const body = (await request.json().catch(() => null)) as { id?: string } | null;
-      const id = body?.id?.trim();
-      if (!id) return json({ error: 'BAD_REQUEST' }, 400);
-      const list = (await this.state.storage.get<string[]>('index:vaults')) ?? [];
-      if (!list.includes(id)) {
-        list.unshift(id);
-        // keep cap 100
-        if (list.length > 100) list.length = 100;
-        await this.state.storage.put('index:vaults', list);
-      }
+    // The single shared object every vault creation passes through. It used
+    // to hold the id list behind GET /vaults, which no longer exists; what
+    // remains is the rate limit, and that is the point. The budget is held in
+    // the object instance, and a freshly provisioned vault object always
+    // starts with an empty one, so this shared route is the only place
+    // creation can actually be bounded.
+    if (url.pathname === '/index/reserve' && method === 'POST') {
       return json({ ok: true });
     }
 
@@ -434,24 +454,26 @@ export class VaultDurableObject {
   }
 
   private checkRateLimit(request: Request): Response | null {
-    // The WebSocket handshake is a single request per connection; counting it
-    // against the request budget only penalises clients for reconnecting.
     if (new URL(request.url).pathname === '/ws') {
       return null;
     }
     const clientIp = request.headers.get('cf-connecting-ip') ?? 'unknown';
+    const limit = rateLimitFor(new URL(request.url).pathname);
+    // Keyed per budget so a burst of ordinary traffic cannot exhaust the
+    // creation allowance, or vice versa.
+    const key = `${limit}:${clientIp}`;
     const now = Date.now();
-    const bucket = this.rateBuckets.get(clientIp);
+    const bucket = this.rateBuckets.get(key);
     if (!bucket || now - bucket.startedAt > RATE_LIMIT_WINDOW_MS) {
-      this.rateBuckets.set(clientIp, { count: 1, startedAt: now });
+      this.rateBuckets.set(key, { count: 1, startedAt: now });
       return null;
     }
     bucket.count += 1;
-    if (bucket.count > RATE_LIMIT_MAX_REQUESTS) {
+    if (bucket.count > limit) {
       return json(
         {
           error: 'TOO_MANY_REQUESTS',
-          message: `limit is ${RATE_LIMIT_MAX_REQUESTS} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`,
+          message: `limit is ${limit} requests per ${RATE_LIMIT_WINDOW_MS / 1000}s`,
         },
         429
       );
