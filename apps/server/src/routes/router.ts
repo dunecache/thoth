@@ -8,6 +8,32 @@ import type { Env } from '../types/worker.js';
 const VAULT_INDEX_NAME = '_vault-index';
 
 /**
+ * Header the worker uses to tell the object that the authentication grace
+ * period is still open. The object trusts it because a Durable Object is
+ * only reachable through this worker — but the worker must strip any inbound
+ * copy, so a client cannot set it for itself.
+ */
+export const AUTH_GRACE_HEADER = 'x-thoth-auth-grace';
+
+/**
+ * Whether credentials must be enforced on the data routes.
+ *
+ * Fails closed: an absent or unparseable date means enforcement is on, so a
+ * typo in configuration cannot silently reopen the server.
+ */
+export function authEnforcedAfter(env: Env): boolean {
+  const raw = env.AUTH_ENFORCED_AFTER;
+  if (!raw) {
+    return true;
+  }
+  const deadline = Date.parse(raw);
+  if (Number.isNaN(deadline)) {
+    return true;
+  }
+  return Date.now() >= deadline;
+}
+
+/**
  * The Durable Object binding, narrowed to what the router calls.
  *
  * The router works with the platform `Response` while the Durable Object
@@ -51,6 +77,7 @@ export function createRouter(env: Env) {
   };
 
   const binding = env.VAULT_DO as unknown as VaultBinding | undefined;
+  const graceOpen = !authEnforcedAfter(env);
 
   /**
    * Copies the client's headers onto an internal request.
@@ -63,6 +90,11 @@ export function createRouter(env: Env) {
    */
   const clientHeaders = (request: Request): Headers => {
     const headers = new Headers(request.headers);
+    // The object's grace flag is trusted because only the worker sets it —
+    // except that this helper copies every inbound header, so a client could
+    // send its own and switch authentication off for itself. Strip it before
+    // the caller has any chance to set the real value.
+    headers.delete(AUTH_GRACE_HEADER);
     return headers;
   };
 
@@ -167,8 +199,12 @@ export function createRouter(env: Env) {
         if (url.pathname === `/vaults/${vaultId}` && request.method === 'GET') {
           const stub = stubFor(vaultId);
           if (stub) {
+            const metadataHeaders = clientHeaders(request);
+            if (graceOpen) {
+              metadataHeaders.set(AUTH_GRACE_HEADER, '1');
+            }
             const res = await stub.fetch('https://internal/metadata', {
-              headers: clientHeaders(request),
+              headers: metadataHeaders,
             });
             if (res.ok) return addCors(res);
           }
@@ -219,6 +255,9 @@ export function createRouter(env: Env) {
           // the Content-Type normalization below.
           const headers = clientHeaders(request);
           headers.set('Content-Type', 'application/json');
+          if (graceOpen) {
+            headers.set(AUTH_GRACE_HEADER, '1');
+          }
           const res = await stub.fetch(`https://internal${path}`, {
             method: request.method,
             body,
@@ -301,6 +340,9 @@ export function createRouter(env: Env) {
           const hasBody = request.method !== 'GET' && request.method !== 'HEAD';
           const body = hasBody ? await request.arrayBuffer() : undefined;
           const headers = clientHeaders(request);
+          if (graceOpen) {
+            headers.set(AUTH_GRACE_HEADER, '1');
+          }
           const res = await stub.fetch(`https://internal${assetPath}`, { method: request.method, headers, body });
           return addCors(res);
         }
@@ -315,6 +357,12 @@ export function createRouter(env: Env) {
             const body = hasBody ? await request.text() : undefined;
             const headers = clientHeaders(request);
             if (hasBody) headers.set('Content-Type', 'application/json');
+            // Listing is a data read and stays inside the grace period.
+            // Removing or rotating a device is not: those are credential
+            // changes, so they are always enforced.
+            if (graceOpen && request.method === 'GET') {
+              headers.set(AUTH_GRACE_HEADER, '1');
+            }
             const res = await deviceStub.fetch(`https://internal${devicePath}`, {
               method: request.method,
               headers,

@@ -49,6 +49,18 @@ interface StoredVault {
   assets: Record<string, AssetMetadata>;
 }
 
+/**
+ * Header the worker sets while the authentication grace period is open.
+ *
+ * Trusted because a Durable Object is only reachable through the worker, and
+ * the worker strips any inbound copy before forwarding.
+ */
+const AUTH_GRACE_HEADER = 'x-thoth-auth-grace';
+
+function isGraceOpen(request: Request): boolean {
+  return request.headers.get(AUTH_GRACE_HEADER) === '1';
+}
+
 /** Storage key for a content-addressed asset blob. */
 function assetBlobKey(hash: string): string {
   return `asset-blob:${hash}`;
@@ -196,7 +208,9 @@ export class VaultDurableObject {
     }
 
     if (url.pathname === '/purge' && method === 'DELETE') {
-      const denied = await this.authorize(request, data);
+      // Never covered by the grace period: deleting a vault must always
+      // require a credential.
+      const denied = await this.authorize(request, data, { graceExempt: false });
       if (denied) {
         return denied;
       }
@@ -347,7 +361,9 @@ export class VaultDurableObject {
       // Authorize before looking the device up. Reporting 404 for an unknown
       // device first would let an anonymous caller enumerate which device
       // ids exist by comparing it against the 401 a known one returns.
-      const denied = await this.authorize(request, data);
+      // Revoking or rotating a credential is always enforced, even inside the
+      // grace period.
+      const denied = await this.authorize(request, data, { graceExempt: false });
       if (denied) {
         return denied;
       }
@@ -419,8 +435,15 @@ export class VaultDurableObject {
    */
   private async authorize(
     request: Request,
-    data: StoredVault
+    data: StoredVault,
+    options: { graceExempt?: boolean } = {}
   ): Promise<Response | null> {
+    // During the grace period the data routes accept a keyless request so a
+    // client predating authentication keeps syncing. Destructive routes pass
+    // graceExempt: false (the default) and are enforced regardless.
+    if (options.graceExempt !== false && isGraceOpen(request)) {
+      return null;
+    }
     const devices = Object.entries(data.metadata.devices);
     if (devices.length === 0) {
       return null;

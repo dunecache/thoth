@@ -53,6 +53,29 @@ has pushed it, so any vault with content is protected.
 
 Revoked and rotated keys stop working immediately.
 
+### Grace period
+
+Clients that predate authentication send no bearer token, so requiring one
+outright would break their sync with an unexplained 401. The server accepts
+keyless requests on the data routes until `AUTH_ENFORCED_AFTER`, an ISO 8601
+instant in `wrangler.toml`:
+
+```toml
+[vars]
+AUTH_ENFORCED_AFTER = "2026-01-01T00:00:00Z"
+```
+
+Roll the date forward once clients have updated; removing it enforces
+immediately. An absent or unparseable value enforces immediately rather than
+opening the window, so a configuration typo cannot silently disable
+authentication.
+
+Destructive routes are never covered. Deleting a vault, and removing or
+rotating a device, always require a credential. So does anything else the
+worker has not explicitly exempted — the grace signal is a header the worker
+sets, and it strips any inbound copy before forwarding, so a client cannot
+switch it off for itself.
+
 ## Errors
 
 Structured JSON:

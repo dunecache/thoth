@@ -18,6 +18,18 @@ name = "thoth-server-prod"
 [vars]
 VERSION = "0.1.0"
 
+# After this instant, device credentials are required on the data routes
+# (push, pull, snapshot, assets, metadata, device listing). Before it, a
+# keyless request is still accepted so clients that predate authentication
+# keep syncing instead of failing with an unexplained 401.
+#
+# Destructive routes are never covered: deleting a vault, or removing or
+# rotating a device, always requires a credential.
+#
+# Roll this date forward once your clients have updated. Deleting the value
+# is equivalent to setting it in the past, i.e. enforcement is immediate.
+AUTH_ENFORCED_AFTER = "2026-01-01T00:00:00Z"
+
 [[durable_objects.bindings]]
 name = "VAULT_DO"
 class_name = "VaultDurableObject"
