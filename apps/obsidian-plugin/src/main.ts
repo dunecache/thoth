@@ -43,7 +43,9 @@ import {
 } from './sync-engine.js';
 import { RetryScheduler } from './retry-scheduler.js';
 import type { VaultAdapter } from './vault-applier.js';
+import { createObsidianVaultAdapter } from './vault-adapter.js';
 import {
+  VaultApplyError,
   applySnapshotToVault,
   applyOperationsToVault,
   assetIdForPath,
@@ -1198,7 +1200,35 @@ export class ThothPlugin extends Plugin {
             });
             return r.ok ? r.data : null;
           };
-          await applyOperationsToVault(adapter, latest.operations, { fetchAsset });
+          // Every operation is attempted even when one fails, so a single bad
+          // path cannot discard the rest of the batch. A throw here means the
+          // revision is deliberately left unadvanced: the batch stays
+          // retryable instead of the vault silently diverging from the
+          // server. Report which paths failed, because an unretried infinite
+          // backoff with no message is indistinguishable from "sync is broken".
+          try {
+            await applyOperationsToVault(adapter, latest.operations, {
+              fetchAsset,
+            });
+          } catch (error) {
+            if (error instanceof VaultApplyError) {
+              for (const failure of error.failures) {
+                console.error('Thoth: failed to apply operation', {
+                  index: failure.index,
+                  type: failure.type,
+                  path: failure.path,
+                  error: failure.error,
+                });
+              }
+              new Notice(
+                `Thoth: ${error.failures.length} change(s) could not be written ` +
+                  `(first: ${error.failures[0]?.type} at ` +
+                  `${error.failures[0]?.path ?? 'unknown path'}). ` +
+                  `Sync will retry.`
+              );
+            }
+            throw error;
+          }
           this.serverRevision = latest.revision;
           await this.saveSettings();
         }
@@ -1597,83 +1627,7 @@ export class ThothPlugin extends Plugin {
   }
 
   private createVaultAdapter(): VaultAdapter {
-    const vault = this.app.vault;
-    // Obsidian's read/modify/rename take a TFile, but getAbstractFileByPath
-    // returns a TAbstractFile that may be a folder. Resolving to a TFile here
-    // keeps the cast in one place instead of at every call site.
-    const fileAt = (path: string): TFile | null => {
-      const file = vault.getAbstractFileByPath(path);
-      return file instanceof TFile ? file : null;
-    };
-    const ensureFolders = async (path: string): Promise<void> => {
-      const parts = path.split('/');
-      parts.pop();
-      let folderPath = '';
-      for (const part of parts) {
-        folderPath = folderPath ? `${folderPath}/${part}` : part;
-        const existing = vault.getAbstractFileByPath(folderPath);
-        if (!existing) {
-          await vault.createFolder(folderPath);
-        }
-      }
-    };
-    return {
-      exists: (path: string) =>
-        Promise.resolve(vault.getAbstractFileByPath(path) !== null),
-      read: async (path: string) => {
-        const file = fileAt(path);
-        if (!file) {
-          throw new Error(`File not found: ${path}`);
-        }
-        return await vault.read(file);
-      },
-      readBinary: async (path: string) => {
-        const file = fileAt(path);
-        if (!file) {
-          throw new Error(`File not found: ${path}`);
-        }
-        return await vault.readBinary(file);
-      },
-      create: async (path: string, content: string) => {
-        await ensureFolders(path);
-        this.applyGuard.recordText(path, content);
-        await vault.create(path, content);
-      },
-      createBinary: async (path: string, data: ArrayBuffer) => {
-        await ensureFolders(path);
-        this.applyGuard.recordBinary(path, await hashArrayBuffer(data));
-        await vault.createBinary(path, data);
-      },
-      modify: async (file: { path: string }, content: string) => {
-        const f = fileAt(file.path);
-        if (f) {
-          this.applyGuard.recordText(file.path, content);
-          await vault.modify(f, content);
-        }
-      },
-      modifyBinary: async (file: { path: string }, data: ArrayBuffer) => {
-        const f = fileAt(file.path);
-        if (f) {
-          this.applyGuard.recordBinary(file.path, await hashArrayBuffer(data));
-          await vault.modifyBinary(f, data);
-        }
-      },
-      rename: async (file: { path: string }, newPath: string) => {
-        const f = fileAt(file.path);
-        if (f) {
-          this.applyGuard.recordPath(file.path);
-          this.applyGuard.recordPath(newPath);
-          await vault.rename(f, newPath);
-        }
-      },
-      delete: async (path: string) => {
-        const file = vault.getAbstractFileByPath(path);
-        if (file) {
-          this.applyGuard.recordPath(path);
-          await vault.delete(file);
-        }
-      },
-    };
+    return createObsidianVaultAdapter(this.app.vault, this.applyGuard);
   }
 
   private storage(): Persistence {

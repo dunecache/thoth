@@ -1,4 +1,8 @@
-import { MAX_ASSET_BYTES, type Operation } from '@thoth/protocol';
+import {
+  MAX_ASSET_BYTES,
+  type Operation,
+  type OperationType,
+} from '@thoth/protocol';
 
 /**
  * Minimal vault adapter required to apply operations.
@@ -152,6 +156,58 @@ export interface ApplyOperationOptions {
   fetchAsset?: (assetId: string) => Promise<ArrayBuffer | null>;
 }
 
+/** One operation in a batch that could not be written to the vault. */
+export interface ApplyFailure {
+  /** Position in the batch, so the caller can log the exact operation. */
+  index: number;
+  type: OperationType;
+  /** The path the operation targeted, when the kind carries one. */
+  path: string | undefined;
+  error: unknown;
+}
+
+/**
+ * Raised when one or more operations in a batch could not be applied.
+ *
+ * The remaining operations are still attempted, so one bad path cannot block
+ * unrelated work. The caller does not advance its revision when this is
+ * thrown, which keeps the batch retryable rather than silently letting the
+ * vault diverge from the server. Re-applying is safe: every operation is
+ * either idempotent or guarded by an existence check.
+ */
+export class VaultApplyError extends Error {
+  readonly failures: readonly ApplyFailure[];
+
+  constructor(failures: readonly ApplyFailure[]) {
+    const first = failures[0];
+    const where = first?.path ?? 'unknown path';
+    super(
+      `Failed to apply ${failures.length} of the batched operations ` +
+        `(first: ${first?.type ?? 'unknown'} at ${where}: ` +
+        `${errorMessage(first?.error)})`
+    );
+    this.name = 'VaultApplyError';
+    this.failures = failures;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+/** The path an operation targets, used to make failures diagnosable. */
+function operationPath(operation: Operation): string | undefined {
+  switch (operation.type) {
+    case 'rename-note':
+      return operation.payload.oldPath;
+    default:
+      return operation.payload.path;
+  }
+}
+
 /**
  * Applies a single operation to the vault.
  *
@@ -287,15 +343,36 @@ export async function applyOperationToVault(
 }
 
 /**
- * Applies a batch of operations in order, skipping no-ops silently.
+ * Applies a batch of operations in order.
+ *
+ * Every operation is attempted even if an earlier one fails, so a single bad
+ * path cannot discard the rest of the batch. Failures are collected and
+ * reported together in a `VaultApplyError` rather than thrown one at a time,
+ * because the caller treats a throw as "revision not advanced" and must learn
+ * about all of them at once.
  */
 export async function applyOperationsToVault(
   vault: VaultAdapter,
   operations: readonly Operation[],
   options?: ApplyOperationOptions
 ): Promise<void> {
-  for (const op of operations) {
-    await applyOperationToVault(vault, op, options);
+  const failures: ApplyFailure[] = [];
+  let index = 0;
+  for (const operation of operations) {
+    try {
+      await applyOperationToVault(vault, operation, options);
+    } catch (error) {
+      failures.push({
+        index,
+        type: operation.type,
+        path: operationPath(operation),
+        error,
+      });
+    }
+    index += 1;
+  }
+  if (failures.length > 0) {
+    throw new VaultApplyError(failures);
   }
 }
 
