@@ -921,7 +921,7 @@ export class ThothPlugin extends Plugin {
       this.realtimeClient?.close();
       this.realtimeClient = undefined;
       this.realtimeStatus = 'closed';
-      this.scheduler?.updateBaseInterval(60_000);
+      this.applySyncCadence('closed');
       this.updateStatusBar();
       return;
     }
@@ -929,7 +929,6 @@ export class ThothPlugin extends Plugin {
       // already connected with current settings
       return;
     }
-    this.scheduler?.updateBaseInterval(300_000);
     this.realtimeClient = connectRealtime({
       serverUrl,
       vaultId,
@@ -941,6 +940,7 @@ export class ThothPlugin extends Plugin {
       },
       onStatusChange: (status) => {
         this.realtimeStatus = status;
+        this.applySyncCadence(status);
         this.updateStatusBar();
       },
       onUnauthorized: (reason) => {
@@ -952,6 +952,22 @@ export class ThothPlugin extends Plugin {
         );
       },
     });
+  }
+
+  /**
+   * Sets how often the periodic poll runs, based on the socket's real state.
+   *
+   * An open realtime connection makes a slow poll redundant, because the
+   * server pokes the client the moment anything changes. That reasoning only
+   * holds while the socket is actually open. The interval used to be raised
+   * as soon as the client was *configured*, so a WebSocket that never
+   * connected — a proxy, a firewall, a dropped upgrade — left the plugin on a
+   * five-minute poll with no route back to the sixty-second one, and the
+   * queue drained five times more slowly than intended while the status bar
+   * showed an unremarkable "polling".
+   */
+  private applySyncCadence(status: RealtimeStatus): void {
+    this.scheduler?.updateBaseInterval(status === 'open' ? 300_000 : 60_000);
   }
 
   /**
