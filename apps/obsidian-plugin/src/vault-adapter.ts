@@ -21,6 +21,13 @@ import { hashArrayBuffer } from './vault-applier.js';
  */
 export interface ObsidianVault {
   getAbstractFileByPath(path: string): TAbstractFile | null;
+  /**
+   * Used only to enumerate the subtree a folder rename moves. Optional so a
+   * caller that never renames a folder need not provide it; when absent the
+   * guard simply records fewer paths, which costs echo suppression rather
+   * than correctness.
+   */
+  getFiles?(): TAbstractFile[];
   createFolder(path: string): Promise<unknown>;
   create(path: string, data: string): Promise<unknown>;
   createBinary(path: string, data: ArrayBuffer): Promise<unknown>;
@@ -134,7 +141,21 @@ export function createObsidianVaultAdapter(
         return;
       }
       await ensureFolders(vault, newPath);
-      applyGuard.recordPath(file.path);
+      // A folder rename moves a subtree, and Obsidian raises a rename event
+      // for the folder and for every descendant. Those descendants are
+      // enumerated up front so the guard knows exactly which events to
+      // absorb; a blanket prefix rule would swallow genuine edits made in the
+      // same window. Only a folder needs this, so the scan is paid on a
+      // rename rather than on every write.
+      if (existing instanceof TFolder) {
+        const prefix = `${existing.path}/`;
+        const moved = (vault.getFiles?.() ?? [])
+          .map((f) => f.path)
+          .filter((path) => path.startsWith(prefix));
+        applyGuard.recordFolderRename(existing.path, newPath, moved);
+      } else {
+        applyGuard.recordPath(file.path);
+      }
       applyGuard.recordPath(newPath);
       await vault.rename(existing, newPath);
     },

@@ -77,7 +77,7 @@ describe('operationSchema', () => {
         {
           path: 'type',
           message:
-            'expected one of: create-note, delete-note, rename-note, replace-content, insert-text, delete-text, replace-range, add-asset, delete-asset',
+            'expected one of: create-note, delete-note, rename-note, replace-content, insert-text, delete-text, replace-range, add-asset, delete-asset, rename-folder',
         },
       ]);
     }

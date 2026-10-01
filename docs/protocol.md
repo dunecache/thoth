@@ -6,7 +6,7 @@ Thoth synchronizes via atomic operations, not whole files.
 
 - `Operation` – immutable, ordered by `revision`
   - `id: string` – stable ULID/UUID
-  - `type: 'create-note'|'delete-note'|'rename-note'|'replace-content'|'insert-text'|'delete-text'|'replace-range'|'add-asset'|'delete-asset'`
+  - `type: 'create-note'|'delete-note'|'rename-note'|'replace-content'|'insert-text'|'delete-text'|'replace-range'|'add-asset'|'delete-asset'|'rename-folder'`
   - `deviceId: string`
   - `revision: number`
   - `parentRevision?: number`
@@ -18,7 +18,8 @@ Thoth synchronizes via atomic operations, not whole files.
 
 - `create-note` – `{ path, content }` — text files (md, txt, canvas, json); binary files use `add-asset` + base64 fallback via `files` map
 - `replace-content` – `{ path, content }`
-- `rename-note` – `{ oldPath, newPath }` — works for both text and binary (renames any `TAbstractFile`)
+- `rename-note` – `{ oldPath, newPath }` — works for both text and binary, but only for files. A folder's own rename event is never emitted as this kind; see `rename-folder`
+- `rename-folder` – `{ oldPath, newPath }` — moves a whole folder subtree (files, assets and nested paths) in one operation, and removes the original folder
 - `delete-note` – `{ path }`
 - `insert-text` – `{ path, index, text }`
 - `delete-text` – `{ path, index, length }`

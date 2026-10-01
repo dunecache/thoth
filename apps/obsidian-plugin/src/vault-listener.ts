@@ -27,6 +27,18 @@ interface ListenerOptions {
   isAppliedChange?: (path: string, fingerprint?: string) => boolean;
   /** Called after a local change was enqueued successfully. */
   onLocalChange?: () => void;
+  /**
+   * Set of folders renamed locally but not yet applied elsewhere. Shared with
+   * the caller so the caller can clear it when a sync begins.
+   */
+  pendingFolderRenames?: Set<string>;
+  /**
+   * Whether the server accepts `rename-folder`. Absent or false means it does
+   * not, and the listener falls back to per-file renames — the old behaviour,
+   * which leaves the original folder behind but never sends an operation the
+   * server would reject.
+   */
+  canRenameFolders?: () => boolean;
 }
 
 /**
@@ -37,6 +49,22 @@ interface ListenerOptions {
 function isSyncedFile(file: TAbstractFile, extensions: string[]): file is TFile {
   const ext = (file as TFile).extension;
   return typeof ext === 'string' && extensions.includes(ext.toLowerCase());
+}
+
+/**
+ * Structural check for folders, by the same reasoning as `isSyncedFile`.
+ *
+ * Only used for renames. Creating or deleting an empty folder stays
+ * unrepresentable until the protocol carries folder state, and emitting an
+ * operation the server cannot accept would break the whole batch.
+ */
+function isFolderNode(file: TAbstractFile): boolean {
+  return (file as TFile).extension === undefined;
+}
+
+/** True when `path` is `folder` itself or sits beneath it. */
+function isWithin(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder}/`);
 }
 
 /**
@@ -64,6 +92,16 @@ function vaultReadBinary(vault: Vault): ((f: TFile) => Promise<ArrayBuffer>) | n
  */
 export function attachVaultListener(options: ListenerOptions): () => void {
   const { vault, queue, getDeviceId, getExtensions } = options;
+
+  /**
+   * Folders renamed locally whose descendants Obsidian still has to report.
+   *
+   * Owned by the caller so it can lapse the set at the start of a sync, the
+   * same moment the apply guard is reset. A timer would be the wrong tool:
+   * the records must outlast the events they absorb, but must not outlive the
+   * sync, or a genuine edit beneath that folder would be dropped.
+   */
+  const pendingFolderRenames = options.pendingFolderRenames ?? new Set<string>();
 
   const safely = async (work: () => Promise<void>): Promise<void> => {
     try {
@@ -128,6 +166,34 @@ export function attachVaultListener(options: ListenerOptions): () => void {
     file: TAbstractFile,
     oldPath: string
   ): Promise<void> => {
+    // Obsidian reports a folder rename and then one rename per descendant
+    // file. Emitting those per-file renames moved the files on other devices
+    // but left the original folder standing empty, because the folder itself
+    // was filtered out and nothing said it should go away. One folder
+    // operation carries the whole subtree instead, so the descendants that
+    // follow are dropped here rather than sent.
+    if (isFolderNode(file) && options.canRenameFolders?.()) {
+      if (pendingFolderRenames.has(oldPath)) {
+        return;
+      }
+      if (options.isAppliedChange?.(oldPath)) {
+        return;
+      }
+      pendingFolderRenames.add(oldPath);
+      await register(
+        changeToDraft({
+          kind: 'rename-folder',
+          oldPath,
+          newPath: file.path,
+        })
+      );
+      return;
+    }
+    for (const folder of pendingFolderRenames) {
+      if (isWithin(oldPath, folder)) {
+        return;
+      }
+    }
     if (!isSyncedFile(file, getExtensions())) {
       return;
     }

@@ -202,6 +202,7 @@ function errorMessage(error: unknown): string {
 function operationPath(operation: Operation): string | undefined {
   switch (operation.type) {
     case 'rename-note':
+    case 'rename-folder':
       return operation.payload.oldPath;
     default:
       return operation.payload.path;
@@ -258,6 +259,18 @@ export async function applyOperationToVault(
     }
     case 'rename-note': {
       const { oldPath, newPath } = operation.payload;
+      const exists = await vault.exists(oldPath);
+      if (exists) {
+        await vault.rename({ path: oldPath }, newPath);
+      }
+      break;
+    }
+    case 'rename-folder': {
+      const { oldPath, newPath } = operation.payload;
+      // Renaming the folder node itself moves the whole subtree in Obsidian,
+      // and removes the old folder. Renaming the descendants one at a time
+      // instead — which is all that was possible before this operation existed
+      // — leaves the original folder and every nested folder behind, empty.
       const exists = await vault.exists(oldPath);
       if (exists) {
         await vault.rename({ path: oldPath }, newPath);

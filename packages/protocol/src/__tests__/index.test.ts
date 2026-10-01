@@ -44,6 +44,7 @@ describe('protocol', () => {
       | 'replace-range'
       | 'add-asset'
       | 'delete-asset'
+      | 'rename-folder'
     >();
   });
 

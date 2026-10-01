@@ -17,7 +17,13 @@ export type ProtocolCapability =
   | 'partial-sync'
   | 'granular-ops'
   | 'idempotency'
-  | 'version-negotiation';
+  | 'version-negotiation'
+  /**
+   * The server accepts `rename-folder`, which moves a folder subtree in one
+   * operation. Without it a client must emit the per-file renames Obsidian
+   * reports instead, which leaves the original folder behind everywhere else.
+   */
+  | 'folders';
 
 /**
  * Largest asset blob the server can store, in bytes.

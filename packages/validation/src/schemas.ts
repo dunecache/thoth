@@ -17,6 +17,7 @@ import type {
   RealtimeClientMessage,
   RealtimeServerMessage,
   RegisterDeviceRequest,
+  RenameFolderOperation,
   RenameNoteOperation,
   ReplaceContentOperation,
 } from '@thoth/protocol';
@@ -64,6 +65,12 @@ const deleteNotePayloadSchema: Validator<DeleteNoteOperation['payload']> =
   });
 
 const renameNotePayloadSchema: Validator<RenameNoteOperation['payload']> =
+  object({
+    oldPath: string({ minLength: 1 }),
+    newPath: string({ minLength: 1 }),
+  });
+
+const renameFolderPayloadSchema: Validator<RenameFolderOperation['payload']> =
   object({
     oldPath: string({ minLength: 1 }),
     newPath: string({ minLength: 1 }),
@@ -118,6 +125,7 @@ const payloadSchemas: Record<OperationType, Validator<unknown>> = {
   'replace-range': replaceRangePayloadSchema,
   'add-asset': addAssetPayloadSchema,
   'delete-asset': deleteAssetPayloadSchema,
+  'rename-folder': renameFolderPayloadSchema,
 };
 
 const operationBaseSchema = object({
@@ -131,7 +139,8 @@ const operationBaseSchema = object({
     'delete-text',
     'replace-range',
     'add-asset',
-    'delete-asset'
+    'delete-asset',
+    'rename-folder'
   ),
   deviceId: string({ minLength: 1, maxLength: 200 }),
   revision: integer({ min: 0 }),

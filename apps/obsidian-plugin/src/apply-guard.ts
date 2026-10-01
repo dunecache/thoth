@@ -28,6 +28,25 @@ export interface ApplyGuard {
    */
   recordPath(path: string): void;
   /**
+   * Records a folder rename and the descendant paths it moves.
+   *
+   * A folder rename moves a whole subtree, and Obsidian emits a rename event
+   * for the folder *and* for every descendant file. Exact-path matching
+   * suppressed only the folder's own event, so each descendant event looked
+   * like a user edit and was queued — turning one applied rename into a burst
+   * of redundant operations sent back to the server, where the engine had
+   * already moved them and rejected each as `NOTE_NOT_FOUND`.
+   *
+   * `descendants` must be the paths actually moved. Counting them keeps the
+   * existing one-record-per-event contract, so no real edit is swallowed by a
+   * blanket prefix rule; the records lapse at the next `reset()` regardless.
+   */
+  recordFolderRename(
+    oldPath: string,
+    newPath: string,
+    descendants: readonly string[]
+  ): void;
+  /**
    * Consumes a pending record for `path` and reports whether the event came
    * from the applier. `fingerprint` is the content the vault event carries;
    * omit it when the file no longer exists.
@@ -65,6 +84,13 @@ export function createApplyGuard(): ApplyGuard {
       // An empty sentinel never equals a real fingerprint, so a later event
       // that does carry content is judged on that content instead.
       record(path, '');
+    },
+    recordFolderRename: (oldPath, newPath, descendants) => {
+      record(oldPath, '');
+      record(newPath, '');
+      for (const path of descendants) {
+        record(path, '');
+      }
     },
     consume: (path, fingerprint) => {
       const existing = pending.get(path);

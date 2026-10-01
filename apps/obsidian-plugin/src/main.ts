@@ -131,6 +131,17 @@ export class ThothPlugin extends Plugin {
   /** Tracks the applier's own vault writes so they are not re-queued. */
   private readonly applyGuard = createApplyGuard();
   /**
+   * Folders renamed locally whose descendant renames Obsidian has yet to
+   * report. Cleared alongside the apply guard at the start of each sync.
+   */
+  private readonly pendingFolderRenames = new Set<string>();
+  /**
+   * Whether the server has advertised `folders`. Starts false so a client that
+   * has not yet heard from the server never emits an operation it might
+   * reject; a pull sets it on the first successful response.
+   */
+  private serverSupportsFolders = false;
+  /**
    * Set when the server rejects this device's credential. Sync halts while
    * it is set, and both the status bar and the settings tab surface it, so a
    * revoked device no longer looks like a healthy idle client.
@@ -257,6 +268,8 @@ export class ThothPlugin extends Plugin {
         getExtensions: () => this.settings.syncedExtensions,
         isAppliedChange: (path, fingerprint) =>
           this.applyGuard.consume(path, fingerprint),
+        pendingFolderRenames: this.pendingFolderRenames,
+        canRenameFolders: () => this.serverSupportsFolders,
         onLocalChange: () => {
           if (
             this.settings.serverUrl &&
@@ -1079,6 +1092,10 @@ export class ThothPlugin extends Plugin {
     }
     this.isSyncing = true;
     this.applyGuard.reset();
+    // Same rationale as the guard: a folder-rename record only needs to
+    // outlast the events it absorbs, and must not outlive the sync or a real
+    // edit beneath that folder would be swallowed.
+    this.pendingFolderRenames.clear();
     this.updateStatusBar();
     let syncSucceeded = false;
     // A cycle can reach several failure branches (a failed download, then a
@@ -1140,6 +1157,8 @@ export class ThothPlugin extends Plugin {
         vault: adapter,
       });
       if (downloadResult.ok) {
+        this.serverSupportsFolders =
+          downloadResult.capabilities?.includes('folders') ?? false;
         this.serverRevision = downloadResult.newRevision;
         await this.saveSettings();
         console.debug('Thoth: downloaded', {

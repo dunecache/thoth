@@ -2,6 +2,7 @@ import type { DurableObjectState } from '@cloudflare/workers-types';
 import {
   MAX_ASSET_BYTES,
   type Operation,
+  type ProtocolCapability,
   type ValidationIssue,
 } from '@thoth/protocol';
 import {
@@ -55,6 +56,24 @@ interface StoredVault {
  * Trusted because a Durable Object is only reachable through the worker, and
  * the worker strips any inbound copy before forwarding.
  */
+/**
+ * Features this server advertises on push and pull responses.
+ *
+ * The client reads them before choosing an operation kind, which is what
+ * makes it safe to roll a new operation out ahead of an old client: a client
+ * that does not see `folders` keeps emitting per-file renames instead of
+ * `rename-folder`, and an old server never receives an operation it would
+ * reject. Advertising nothing, as this file previously did, silently opted
+ * every client out of that negotiation.
+ */
+const SERVER_CAPABILITIES: ProtocolCapability[] = [
+  'batching',
+  'partial-sync',
+  'granular-ops',
+  'idempotency',
+  'folders',
+];
+
 const AUTH_GRACE_HEADER = 'x-thoth-auth-grace';
 
 function isGraceOpen(request: Request): boolean {
@@ -563,7 +582,7 @@ export class VaultDurableObject {
     if (this.isExactReplay(log, baseRevision, operations)) {
       return json({
         revision: snapshot.revision,
-        capabilities: [],
+        capabilities: SERVER_CAPABILITIES,
         replayed: true,
       });
     }
@@ -655,7 +674,10 @@ export class VaultDurableObject {
     const pushingDeviceId = operations[0]?.deviceId;
     this.broadcastVaultChanged(applied.state.revision, pushingDeviceId);
 
-    return json({ revision: applied.state.revision, capabilities: [] });
+    return json({
+      revision: applied.state.revision,
+      capabilities: SERVER_CAPABILITIES,
+    });
   }
 
   /**

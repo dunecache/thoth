@@ -47,6 +47,12 @@ export class MemoryVault implements ObsidianVault {
     }
   }
 
+  getFiles(): TFile[] {
+    return [...this.files.keys(), ...this.binaries.keys()]
+      .map((path) => this.getAbstractFileByPath(path))
+      .filter((f): f is TFile => f instanceof TFile);
+  }
+
   getAbstractFileByPath(path: string): TFile | TFolder | null {
     if (this.files.has(path) || this.binaries.has(path)) {
       const file = new TFile();

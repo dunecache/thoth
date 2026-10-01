@@ -1,4 +1,8 @@
-import { MAX_ASSET_BYTES, type Operation } from '@thoth/protocol';
+import {
+  MAX_ASSET_BYTES,
+  type Operation,
+  type ProtocolCapability,
+} from '@thoth/protocol';
 import { operationSchema } from '@thoth/validation';
 import { binaryHeaders, jsonHeaders, readHeaders } from './auth.js';
 import { OperationQueue } from './queue.js';
@@ -88,7 +92,13 @@ export type UploadResult =
 
 /** Result of a pull attempt. */
 export type PullResult =
-  | { ok: true; revision: number; operations: Operation[] }
+  | {
+      ok: true;
+      revision: number;
+      operations: Operation[];
+      /** Features the server advertises; absent on older servers. */
+      capabilities?: ProtocolCapability[];
+    }
   | ({ ok: false } & SyncFailure);
 
 /**
@@ -227,7 +237,14 @@ export async function downloadOperations(params: {
       const revision = (body as { revision: number }).revision;
       const operations = (body as { operations: unknown[] })
         .operations as Operation[];
-      return { ok: true, revision, operations };
+      // Capabilities are optional on purpose: a server that predates them
+      // must read as "none known" rather than failing the whole pull.
+      const rawCapabilities = (body as { capabilities?: unknown })
+        .capabilities;
+      const capabilities = Array.isArray(rawCapabilities)
+        ? (rawCapabilities as ProtocolCapability[])
+        : undefined;
+      return { ok: true, revision, operations, ...(capabilities ? { capabilities } : {}) };
     }
 
     return { ok: false, error: 'Pull response missing revision or operations' };
@@ -312,7 +329,12 @@ export async function downloadAsset(params: {
  * Returns the new server revision on success.
  */
 export type DownloadAndApplyResult =
-  | { ok: true; newRevision: number }
+  | {
+      ok: true;
+      newRevision: number;
+      /** Features the server advertised; absent on servers that predate them. */
+      capabilities?: ProtocolCapability[];
+    }
   | ({ ok: false } & SyncFailure);
 
 export async function downloadAndApply(params: {
@@ -364,7 +386,7 @@ export async function downloadAndApply(params: {
     await applyOperationsToVault(params.vault, validOps, { fetchAsset });
   }
 
-  return { ok: true, newRevision: pull.revision };
+  return { ok: true, newRevision: pull.revision, capabilities: pull.capabilities };
 }
 
 export interface SnapshotAsset {

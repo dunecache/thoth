@@ -8,10 +8,31 @@
 
 import type { Operation } from '@thoth/protocol';
 
-import type { VaultState } from './state.js';
+import type { AssetRecord, VaultState } from './state.js';
 
 export type OperationError =
-  'NOTE_EXISTS' | 'NOTE_NOT_FOUND' | 'TARGET_EXISTS' | 'REVISION_MISMATCH';
+  | 'NOTE_EXISTS'
+  | 'NOTE_NOT_FOUND'
+  | 'TARGET_EXISTS'
+  | 'REVISION_MISMATCH';
+
+/**
+ * True when `path` is `prefix` itself or something beneath it.
+ *
+ * Segment-aware on purpose: `archive2/note.md` must not count as living
+ * inside `archive`, which is why this compares against `prefix + '/'`
+ * rather than a bare `startsWith`.
+ */
+export function isWithinFolder(path: string, prefix: string): boolean {
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
+/** Rewrites `path` so that it sits under `newPrefix` instead of `oldPrefix`. */
+function reparent(path: string, oldPrefix: string, newPrefix: string): string {
+  return path === oldPrefix
+    ? newPrefix
+    : newPrefix + path.slice(oldPrefix.length);
+}
 
 export type ApplyResult =
   { ok: true; state: VaultState } | { ok: false; error: OperationError };
@@ -50,6 +71,20 @@ export function operationError(
       const targetInFiles = op.payload.newPath in state.files;
       const targetInAssets = op.payload.newPath in state.assets;
       return targetInFiles || targetInAssets ? 'TARGET_EXISTS' : null;
+    }
+    case 'rename-folder': {
+      const { newPath } = op.payload;
+      // Deliberately no "does this folder exist" check. Folders are derived
+      // from paths, so an empty folder has no trace in state and cannot be
+      // confirmed; rejecting it would wedge the whole batch on an ordinary
+      // user action. Renaming one is a no-op on the server instead.
+      //
+      // A collision is still refused: it would overwrite live content on
+      // every other device.
+      const collision =
+        Object.keys(state.files).some((p) => isWithinFolder(p, newPath)) ||
+        Object.keys(state.assets).some((p) => isWithinFolder(p, newPath));
+      return collision ? 'TARGET_EXISTS' : null;
     }
     case 'replace-content':
       return null;
@@ -95,6 +130,43 @@ export function applyOperation(state: VaultState, op: Operation): ApplyResult {
         assets[op.payload.newPath] = meta;
       }
       break;
+    }
+    case 'rename-folder': {
+      const { oldPath, newPath } = op.payload;
+      const reparentEntries = (
+        entries: Record<string, string>
+      ): Record<string, string> => {
+        const moved: Record<string, string> = {};
+        for (const [path, value] of Object.entries(entries)) {
+          if (isWithinFolder(path, oldPath)) {
+            moved[reparent(path, oldPath, newPath)] = value;
+          } else {
+            moved[path] = value;
+          }
+        }
+        return moved;
+      };
+      const reparentAssets = (
+        entries: Record<string, AssetRecord>
+      ): Record<string, AssetRecord> => {
+        const moved: Record<string, AssetRecord> = {};
+        for (const [path, value] of Object.entries(entries)) {
+          if (isWithinFolder(path, oldPath)) {
+            moved[reparent(path, oldPath, newPath)] = value;
+          } else {
+            moved[path] = value;
+          }
+        }
+        return moved;
+      };
+      return {
+        ok: true,
+        state: {
+          revision: nextRevision(state.revision),
+          files: reparentEntries(files),
+          assets: reparentAssets(assets),
+        },
+      };
     }
     case 'replace-content':
       files[op.payload.path] = op.payload.content;

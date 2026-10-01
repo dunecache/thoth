@@ -36,6 +36,8 @@ export {
   InsertTextPayload,
   Operation,
   OperationType,
+  RenameFolderOperation,
+  RenameFolderPayload,
   RenameNoteOperation,
   RenameNotePayload,
   ReplaceContentOperation,

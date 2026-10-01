@@ -22,7 +22,8 @@ export type OperationType =
   | 'delete-text'
   | 'replace-range'
   | 'add-asset'
-  | 'delete-asset';
+  | 'delete-asset'
+  | 'rename-folder';
 
 export interface CreateNotePayload {
   /** Vault-relative note path, e.g. "notes/hello". */
@@ -36,6 +37,20 @@ export interface DeleteNotePayload {
 }
 
 export interface RenameNotePayload {
+  oldPath: string;
+  newPath: string;
+}
+
+/**
+ * Payload for a folder rename.
+ *
+ * Unlike `rename-note`, this moves a whole subtree: every file, asset and
+ * nested folder beneath `oldPath` is rewritten under `newPath`. A folder
+ * rename is otherwise unrepresentable, because Obsidian emits one rename
+ * event per descendant file and never one for the folder's own disappearance
+ * at the destination.
+ */
+export interface RenameFolderPayload {
   oldPath: string;
   newPath: string;
 }
@@ -116,6 +131,17 @@ export interface RenameNoteOperation {
   payload: RenameNotePayload;
 }
 
+export interface RenameFolderOperation {
+  id: OperationId;
+  type: 'rename-folder';
+  deviceId: DeviceId;
+  revision: Revision;
+  parentRevision?: Revision;
+  timestamp?: number;
+  metadata?: OperationMetadata;
+  payload: RenameFolderPayload;
+}
+
 export interface ReplaceContentOperation {
   id: OperationId;
   type: 'replace-content';
@@ -191,4 +217,5 @@ export type Operation =
   | DeleteTextOperation
   | ReplaceRangeOperation
   | AddAssetOperation
-  | DeleteAssetOperation;
+  | DeleteAssetOperation
+  | RenameFolderOperation;
