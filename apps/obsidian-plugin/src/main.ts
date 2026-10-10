@@ -1291,7 +1291,10 @@ export class ThothPlugin extends Plugin {
             reason: prepared.reason,
           });
           noteFailure(
-            prepared.detail ?? `cannot send a pending asset (${prepared.reason})`
+            prepared.detail ??
+              (prepared.reason === 'FOLDERS_UNSUPPORTED'
+                ? 'the server does not support folder sync yet; the queued folder change is held back'
+                : `cannot send a pending asset (${prepared.reason})`)
           );
           break;
         }
@@ -1361,15 +1364,22 @@ export class ThothPlugin extends Plugin {
     }
   }
 
-  /**
-   * Uploads the binary blobs a batch references and returns the operations
-   * that are safe to push.
+/**
+   * Returns the operations in a batch that are safe to push.
    *
-   * An `add-asset` whose file is missing locally, unreadable, or too large
-   * to store cannot have its blob uploaded. Pushing it anyway would record
-   * an asset in the server snapshot that no other device can download, so
-   * the whole batch is held back instead: dropping just that operation
-   * would desynchronise the queue positions the server assigns.
+   * Two kinds are held back rather than sent.
+   *
+   * An `add-asset` whose file is missing locally, unreadable, or too large to
+   * store cannot have its blob uploaded. Pushing it anyway would record an
+   * asset in the server snapshot that no other device can download.
+   *
+   * A folder operation is held back while the server has not advertised the
+   * `folders` capability. An older server validates the operation type against
+   * a closed list and refuses the whole request, and a refused batch is
+   * retried unchanged, so pushing one would leave the device unable to upload
+   * anything at all until its queue was cleared by hand. Holding it back is
+   * visible — the cycle reports a failure — and the data survives, which is
+   * the difference between a paused device and a wedged one.
    */
   private async prepareBatchForPush(
     batch: readonly Operation[],
@@ -1378,7 +1388,7 @@ export class ThothPlugin extends Plugin {
     | { ok: true; operations: Operation[] }
     | {
         ok: false;
-        reason: 'ASSET_UPLOAD_FAILED' | 'ASSET_UNAVAILABLE';
+        reason: 'ASSET_UPLOAD_FAILED' | 'ASSET_UNAVAILABLE' | 'FOLDERS_UNSUPPORTED';
         path?: string;
         /** Set when the upload was refused rather than unreachable. */
         unauthorized?: boolean;
@@ -1386,6 +1396,21 @@ export class ThothPlugin extends Plugin {
         detail?: string;
       }
   > {
+    if (!this.serverSupportsFolders) {
+      const folderOp = batch.find(
+        (op) =>
+          op.type === 'create-folder' ||
+          op.type === 'delete-folder' ||
+          op.type === 'rename-folder'
+      );
+      if (folderOp) {
+        console.warn('Thoth: server has not advertised folder support, holding back batch', {
+          type: folderOp.type,
+          path: 'path' in folderOp.payload ? folderOp.payload.path : folderOp.payload.oldPath,
+        });
+        return { ok: false, reason: 'FOLDERS_UNSUPPORTED' };
+      }
+    }
     for (const op of batch) {
       if (op.type !== 'add-asset') {
         continue;

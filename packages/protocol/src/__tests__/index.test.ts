@@ -2,9 +2,13 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
   AddAssetOperation,
+  CreateFolderOperation,
+  CreateFolderPayload,
   CreateNoteOperation,
   CreateNotePayload,
   DeleteAssetOperation,
+  DeleteFolderOperation,
+  DeleteFolderPayload,
   DeleteNoteOperation,
   DeleteTextOperation,
   ERROR_CODES,
@@ -14,6 +18,8 @@ import {
   PullOperationsResponse,
   PushOperationsRequest,
   RegisterDeviceResponse,
+  RenameFolderOperation,
+  RenameFolderPayload,
   RenameNoteOperation,
   ReplaceContentOperation,
   ReplaceRangeOperation,
@@ -65,7 +71,27 @@ describe('protocol', () => {
       | ReplaceRangeOperation['payload']
       | AddAssetOperation['payload']
       | DeleteAssetOperation['payload']
+      | RenameFolderOperation['payload']
+      | CreateFolderOperation['payload']
+      | DeleteFolderOperation['payload']
     >();
+  });
+
+  it('keeps the folder payloads separate from the note payloads', () => {
+    // `create-folder` and `delete-note` are both `{ path: string }`, so the
+    // union above collapses them into one member and passes either way. These
+    // assertions are what would catch a payload being reshaped into another
+    // operation's — a `{ path }` becoming a `{ oldPath, newPath }` would
+    // otherwise compile cleanly and be rejected by every server.
+    expectTypeOf<
+      CreateFolderOperation['payload']
+    >().toEqualTypeOf<CreateFolderPayload>();
+    expectTypeOf<
+      DeleteFolderOperation['payload']
+    >().toEqualTypeOf<DeleteFolderPayload>();
+    expectTypeOf<
+      RenameFolderOperation['payload']
+    >().toEqualTypeOf<RenameFolderPayload>();
   });
 
   it('push request carries a base revision and ordered operations', () => {

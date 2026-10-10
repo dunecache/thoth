@@ -22,12 +22,28 @@ client-side only: create one, pick a recently used one, or import a
 
 - `POST /vaults/:id/push`
   Body: `{ baseRevision: number, operations: Operation[] }`
-  Response: `{ revision: number }` or 409 Conflict
+  Response: `{ revision, capabilities }` or 409 Conflict
 - `POST /vaults/:id/pull`
   Body: `{ sinceRevision: number }`
-  Response: `{ revision: number, operations: Operation[] }`
+  Response: `{ revision, operations, capabilities, hasMore, nextRevision? }`
 - `GET /vaults/:id/snapshot`
-  Response: `{ revision: number, files: Record<string,string> }`
+  Response: `{ revision, files, assets, folders }`
+- `POST /vaults/:id/snapshot`
+  Body: `{ revision, files, assets?, folders? }`
+
+`capabilities` lists what the server accepts — `batching`, `partial-sync`,
+`granular-ops`, `idempotency`, `folders`. Clients must emit an operation only
+once they have seen the server advertise it; an operation kind outside the
+list fails validation and takes its whole batch with it. The client learns this
+from `pull`, which it performs before anything is queued.
+
+`assets` and `folders` are optional in a snapshot body: a snapshot written
+before either existed still validates, and the server defaults both. `folders`
+holds only folders no file path implies — see `protocol.md`.
+
+Paging a large log: send `limit` and follow `nextRevision` while `hasMore` is
+true. Asking for a `sinceRevision` below retained history returns 410 rather
+than a partial set that would leave the client silently inconsistent.
 
 ### Devices
 
