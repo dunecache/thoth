@@ -14,6 +14,10 @@ dist
 build
 *.js
 !apps/server/package.json
+# `*.js` is here to ignore compiled build output, but it also matched this
+# config and left it out of the repository — so `pnpm lint` passed on every
+# developer machine and failed on CI, which has never had a working lint step.
+!eslint.config.js
 
 # Misc
 .DS_Store
