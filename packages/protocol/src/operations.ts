@@ -23,7 +23,9 @@ export type OperationType =
   | 'replace-range'
   | 'add-asset'
   | 'delete-asset'
-  | 'rename-folder';
+  | 'rename-folder'
+  | 'create-folder'
+  | 'delete-folder';
 
 export interface CreateNotePayload {
   /** Vault-relative note path, e.g. "notes/hello". */
@@ -39,6 +41,24 @@ export interface DeleteNotePayload {
 export interface RenameNotePayload {
   oldPath: string;
   newPath: string;
+}
+
+/**
+ * Payload for a folder creation.
+ *
+ * Folders holding files are implied by those paths and never carried here;
+ * this operation exists for the folder that would otherwise leave no trace at
+ * all — one the user created and expects to still be there, empty, on every
+ * device.
+ */
+export interface CreateFolderPayload {
+  /** Vault-relative folder path, e.g. "archive/2024". */
+  path: string;
+}
+
+/** Payload for a folder deletion. */
+export interface DeleteFolderPayload {
+  path: string;
 }
 
 /**
@@ -131,6 +151,28 @@ export interface RenameNoteOperation {
   payload: RenameNotePayload;
 }
 
+export interface CreateFolderOperation {
+  id: OperationId;
+  type: 'create-folder';
+  deviceId: DeviceId;
+  revision: Revision;
+  parentRevision?: Revision;
+  timestamp?: number;
+  metadata?: OperationMetadata;
+  payload: CreateFolderPayload;
+}
+
+export interface DeleteFolderOperation {
+  id: OperationId;
+  type: 'delete-folder';
+  deviceId: DeviceId;
+  revision: Revision;
+  parentRevision?: Revision;
+  timestamp?: number;
+  metadata?: OperationMetadata;
+  payload: DeleteFolderPayload;
+}
+
 export interface RenameFolderOperation {
   id: OperationId;
   type: 'rename-folder';
@@ -218,4 +260,6 @@ export type Operation =
   | ReplaceRangeOperation
   | AddAssetOperation
   | DeleteAssetOperation
-  | RenameFolderOperation;
+  | RenameFolderOperation
+  | CreateFolderOperation
+  | DeleteFolderOperation;

@@ -7,8 +7,10 @@
  */
 
 import type {
+  CreateFolderOperation,
   CreateNoteOperation,
   CreateVaultRequest,
+  DeleteFolderOperation,
   DeleteNoteOperation,
   Operation,
   OperationType,
@@ -76,6 +78,16 @@ const renameFolderPayloadSchema: Validator<RenameFolderOperation['payload']> =
     newPath: string({ minLength: 1 }),
   });
 
+const createFolderPayloadSchema: Validator<CreateFolderOperation['payload']> =
+  object({
+    path: string({ minLength: 1 }),
+  });
+
+const deleteFolderPayloadSchema: Validator<DeleteFolderOperation['payload']> =
+  object({
+    path: string({ minLength: 1 }),
+  });
+
 const replaceContentPayloadSchema: Validator<
   ReplaceContentOperation['payload']
 > = object({
@@ -126,6 +138,8 @@ const payloadSchemas: Record<OperationType, Validator<unknown>> = {
   'add-asset': addAssetPayloadSchema,
   'delete-asset': deleteAssetPayloadSchema,
   'rename-folder': renameFolderPayloadSchema,
+  'create-folder': createFolderPayloadSchema,
+  'delete-folder': deleteFolderPayloadSchema,
 };
 
 const operationBaseSchema = object({
@@ -140,7 +154,9 @@ const operationBaseSchema = object({
     'replace-range',
     'add-asset',
     'delete-asset',
-    'rename-folder'
+    'rename-folder',
+    'create-folder',
+    'delete-folder'
   ),
   deviceId: string({ minLength: 1, maxLength: 200 }),
   revision: integer({ min: 0 }),
@@ -215,11 +231,17 @@ const assetRecordSchema = object({
   mimeType: optional(string({ maxLength: 200 })),
 });
 
-/** Schema for a stored vault snapshot (revision + file map + optional assets). */
+/**
+ * Schema for a stored vault snapshot.
+ *
+ * `assets` and `folders` are optional so a snapshot written before either
+ * field existed still validates; `deserializeSnapshot` defaults both.
+ */
 export const snapshotSchema = object({
   revision: integer({ min: 0 }),
   files: record(string()),
   assets: optional(record(assetRecordSchema)),
+  folders: optional(array(string({ minLength: 1 }))),
 });
 
 /** Schema for a WebSocket ticket request body. */

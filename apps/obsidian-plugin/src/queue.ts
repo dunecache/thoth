@@ -1,7 +1,9 @@
 import type {
   AddAssetPayload,
+  CreateFolderPayload,
   CreateNotePayload,
   DeleteAssetPayload,
+  DeleteFolderPayload,
   DeleteNotePayload,
   DeleteTextPayload,
   DeviceId,
@@ -27,7 +29,9 @@ export type OperationDraft =
   | { type: 'replace-range'; payload: ReplaceRangePayload }
   | { type: 'add-asset'; payload: AddAssetPayload }
   | { type: 'delete-asset'; payload: DeleteAssetPayload }
-  | { type: 'rename-folder'; payload: RenameFolderPayload };
+  | { type: 'rename-folder'; payload: RenameFolderPayload }
+  | { type: 'create-folder'; payload: CreateFolderPayload }
+  | { type: 'delete-folder'; payload: DeleteFolderPayload };
 
 /** Called after the queue changes so callers can persist it. */
 export type QueueChangeListener = (queue: OperationQueue) => Promise<void>;
@@ -170,6 +174,22 @@ export class OperationQueue {
         return {
           id,
           type: 'rename-folder',
+          deviceId,
+          revision,
+          payload: draft.payload,
+        };
+      case 'create-folder':
+        return {
+          id,
+          type: 'create-folder',
+          deviceId,
+          revision,
+          payload: draft.payload,
+        };
+      case 'delete-folder':
+        return {
+          id,
+          type: 'delete-folder',
           deviceId,
           revision,
           payload: draft.payload,

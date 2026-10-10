@@ -53,6 +53,13 @@ export class MemoryVault implements ObsidianVault {
       .filter((f): f is TFile => f instanceof TFile);
   }
 
+  /** Mirrors Obsidian: every folder in the vault, at any depth. */
+  getAllFolders(): TFolder[] {
+    return [...this.folders]
+      .map((path) => this.getAbstractFileByPath(path))
+      .filter((f): f is TFolder => f instanceof TFolder);
+  }
+
   getAbstractFileByPath(path: string): TFile | TFolder | null {
     if (this.files.has(path) || this.binaries.has(path)) {
       const file = new TFile();
@@ -156,8 +163,17 @@ export class MemoryVault implements ObsidianVault {
   delete(file: TFile | TFolder): Promise<void> {
     this.record('delete', file.path);
     if (file instanceof TFolder) {
+      // Obsidian removes the contents with the folder, not just the folder.
+      const prefix = `${file.path}/`;
+      for (const map of [this.files, this.binaries]) {
+        for (const key of [...map.keys()]) {
+          if (key.startsWith(prefix)) {
+            map.delete(key);
+          }
+        }
+      }
       for (const folder of [...this.folders]) {
-        if (folder === file.path || folder.startsWith(`${file.path}/`)) {
+        if (folder === file.path || folder.startsWith(prefix)) {
           this.folders.delete(folder);
         }
       }

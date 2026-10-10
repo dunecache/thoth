@@ -45,6 +45,8 @@ describe('protocol', () => {
       | 'add-asset'
       | 'delete-asset'
       | 'rename-folder'
+      | 'create-folder'
+      | 'delete-folder'
     >();
   });
 

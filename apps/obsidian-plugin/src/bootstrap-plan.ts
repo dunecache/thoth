@@ -37,8 +37,12 @@ export function planBootstrap(params: {
   deviceId: string;
   serverFiles: Record<string, string>;
   serverAssets: Record<string, SnapshotAsset>;
+  /** Folders the server already holds. */
+  serverFolders: readonly string[];
   assetIdForPath: (path: string) => string;
   localFiles: readonly LocalEntry[];
+  /** Local folders no synchronized note implies. Empty when unsupported. */
+  localFolders: readonly string[];
 }): BootstrapPlan {
   const { deviceId } = params;
   if (!deviceId) {
@@ -90,6 +94,20 @@ export function planBootstrap(params: {
         payload: { path: entry.path, content: entry.content },
       });
     }
+  }
+  // Folders are diffed separately because they carry no content to compare:
+  // a folder the server already holds is simply not sent again. Creating one
+  // it already has is a no-op, so this costs nothing when the two sides
+  // disagree, which is why it needs no hash the way an asset does.
+  const knownFolders = new Set(params.serverFolders);
+  for (const path of params.localFolders) {
+    if (knownFolders.has(path)) {
+      continue;
+    }
+    drafts.push({
+      type: 'create-folder',
+      payload: { path },
+    });
   }
   return { ok: true, drafts };
 }

@@ -6,6 +6,7 @@ import {
   assetIdForPath,
   hashArrayBuffer,
   isBinaryPath,
+  isHiddenPath,
   MAX_ASSET_SIZE,
   mimeTypeForPath,
 } from './vault-applier.js';
@@ -33,12 +34,13 @@ interface ListenerOptions {
    */
   pendingFolderRenames?: Set<string>;
   /**
-   * Whether the server accepts `rename-folder`. Absent or false means it does
-   * not, and the listener falls back to per-file renames — the old behaviour,
-   * which leaves the original folder behind but never sends an operation the
-   * server would reject.
+   * Whether the server accepts the folder operations and carries folders in
+   * its snapshot. Absent or false means it does not, and the listener falls
+   * back to the behaviour an older server understands: renames travel per
+   * file, and folders are never mentioned at all. Neither choice ever sends
+   * an operation the server would reject.
    */
-  canRenameFolders?: () => boolean;
+  canSyncFolders?: () => boolean;
 }
 
 /**
@@ -54,9 +56,9 @@ function isSyncedFile(file: TAbstractFile, extensions: string[]): file is TFile 
 /**
  * Structural check for folders, by the same reasoning as `isSyncedFile`.
  *
- * Only used for renames. Creating or deleting an empty folder stays
- * unrepresentable until the protocol carries folder state, and emitting an
- * operation the server cannot accept would break the whole batch.
+ * Used for renames and, when the server advertises folders, for creations and
+ * deletions too. Without that capability these events are dropped, which is
+ * what an older server expects.
  */
 function isFolderNode(file: TAbstractFile): boolean {
   return (file as TFile).extension === undefined;
@@ -125,6 +127,27 @@ export function attachVaultListener(options: ListenerOptions): () => void {
     file: TAbstractFile,
     kind: 'create' | 'modify'
   ): Promise<void> => {
+    if (isFolderNode(file)) {
+      // The guard is consulted first, ahead of every policy filter, so its
+      // record always drains. Left pending it would swallow the next genuine
+      // event for the same path — the user's own create, in the window before
+      // the next sync resets it.
+      if (options.isAppliedChange?.(file.path)) {
+        return;
+      }
+      // Obsidian reports the folder itself, then the note inside it. Sending
+      // the folder as well is redundant once the note exists — the note's path
+      // already implies its parents — but harmless, and it is the only way a
+      // folder the user made and left empty can survive at all.
+      if (!options.canSyncFolders?.()) {
+        return;
+      }
+      if (isHiddenPath(file.path)) {
+        return;
+      }
+      await register(changeToDraft({ kind: 'create-folder', path: file.path }));
+      return;
+    }
     if (!isSyncedFile(file, getExtensions())) {
       return;
     }
@@ -166,14 +189,25 @@ export function attachVaultListener(options: ListenerOptions): () => void {
     file: TAbstractFile,
     oldPath: string
   ): Promise<void> => {
-    // Obsidian reports a folder rename and then one rename per descendant
-    // file. Emitting those per-file renames moved the files on other devices
-    // but left the original folder standing empty, because the folder itself
-    // was filtered out and nothing said it should go away. One folder
-    // operation carries the whole subtree instead, so the descendants that
-    // follow are dropped here rather than sent.
-    if (isFolderNode(file) && options.canRenameFolders?.()) {
-      if (pendingFolderRenames.has(oldPath)) {
+    // Obsidian reports a folder rename and then one rename per descendant —
+    // a nested folder as well as each file. Sending the per-file renames moved
+    // the files on other devices but left the original folder standing empty,
+    // because nothing said it should go away. One folder operation carries
+    // the whole subtree instead, so every descendant that follows is dropped
+    // here rather than sent.
+    //
+    // The check has to come before the folder branch, not just before the
+    // file one: a nested folder arriving as its own `rename-folder` would be
+    // rejected as TARGET_EXISTS, because the first operation has already
+    // moved the path it targets. That fails the batch on the server, and the
+    // batch is retried unchanged, so the device wedges for good.
+    for (const folder of pendingFolderRenames) {
+      if (isWithin(oldPath, folder)) {
+        return;
+      }
+    }
+    if (isFolderNode(file) && options.canSyncFolders?.()) {
+      if (isHiddenPath(file.path) || isHiddenPath(oldPath)) {
         return;
       }
       if (options.isAppliedChange?.(oldPath)) {
@@ -189,11 +223,6 @@ export function attachVaultListener(options: ListenerOptions): () => void {
       );
       return;
     }
-    for (const folder of pendingFolderRenames) {
-      if (isWithin(oldPath, folder)) {
-        return;
-      }
-    }
     if (!isSyncedFile(file, getExtensions())) {
       return;
     }
@@ -206,6 +235,26 @@ export function attachVaultListener(options: ListenerOptions): () => void {
   };
 
   const handleDelete = async (file: TAbstractFile): Promise<void> => {
+    if (isFolderNode(file)) {
+      // Deleting a folder also reports every note inside it, and those
+      // `delete-note` operations are queued below. Only the folder itself is
+      // handled here; cascading over its contents would make those fail as
+      // NOT_FOUND and reject the whole batch.
+      //
+      // The guard comes first so its record drains even when the folder is
+      // not synchronized — see the same ordering in `handleUpsert`.
+      if (options.isAppliedChange?.(file.path)) {
+        return;
+      }
+      if (!options.canSyncFolders?.()) {
+        return;
+      }
+      if (isHiddenPath(file.path)) {
+        return;
+      }
+      await register(changeToDraft({ kind: 'delete-folder', path: file.path }));
+      return;
+    }
     if (!isSyncedFile(file, getExtensions())) {
       return;
     }

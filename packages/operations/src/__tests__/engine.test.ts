@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import type {
   AddAssetOperation,
+  CreateFolderOperation,
   CreateNoteOperation,
+  DeleteFolderOperation,
   DeleteNoteOperation,
   Operation,
   RenameFolderOperation,
@@ -17,6 +19,7 @@ import {
   operationError,
 } from '../index.js';
 import { createVaultState } from '../index.js';
+import type { VaultState } from '../index.js';
 
 function createNote(
   op: Partial<CreateNoteOperation> = {}
@@ -96,29 +99,29 @@ describe('applyOperation', () => {
     const result = applyOperation(state, createNote());
     expect(result).toEqual({
       ok: true,
-      state: { revision: 1, files: { 'notes/a.md': 'hello' }, assets: {} },
+      state: { revision: 1, files: { 'notes/a.md': 'hello' }, assets: {}, folders: [] },
     });
   });
 
   it('does not mutate the input state', () => {
     const state = createVaultState();
     applyOperation(state, createNote());
-    expect(state).toEqual({ revision: 0, files: {}, assets: {} });
+    expect(state).toEqual({ revision: 0, files: {}, assets: {}, folders: [] });
   });
 
   it('upserts an existing note on create', () => {
-    const state = { revision: 0, files: { 'notes/a.md': 'x' }, assets: {} };
+    const state = { revision: 0, files: { 'notes/a.md': 'x' }, assets: {}, folders: [] };
     const result = applyOperation(state, createNote());
     expect(result).toEqual({
       ok: true,
-      state: { revision: 1, files: { 'notes/a.md': 'hello' }, assets: {} },
+      state: { revision: 1, files: { 'notes/a.md': 'hello' }, assets: {}, folders: [] },
     });
   });
 
   it('deletes a note', () => {
-    const state = { revision: 0, files: { 'notes/a.md': 'x' }, assets: {} };
+    const state = { revision: 0, files: { 'notes/a.md': 'x' }, assets: {}, folders: [] };
     const result = applyOperation(state, deleteNote());
-    expect(result).toEqual({ ok: true, state: { revision: 1, files: {}, assets: {} } });
+    expect(result).toEqual({ ok: true, state: { revision: 1, files: {}, assets: {}, folders: [] } });
   });
 
   it('rejects deleting a missing note', () => {
@@ -127,11 +130,11 @@ describe('applyOperation', () => {
   });
 
   it('renames a note', () => {
-    const state = { revision: 0, files: { 'notes/a.md': 'content' }, assets: {} };
+    const state = { revision: 0, files: { 'notes/a.md': 'content' }, assets: {}, folders: [] };
     const result = applyOperation(state, renameNote());
     expect(result).toEqual({
       ok: true,
-      state: { revision: 1, files: { 'notes/b.md': 'content' }, assets: {} },
+      state: { revision: 1, files: { 'notes/b.md': 'content' }, assets: {}, folders: [] },
     });
   });
 
@@ -144,18 +147,18 @@ describe('applyOperation', () => {
     const state = {
       revision: 0,
       files: { 'notes/a.md': 'a', 'notes/b.md': 'b' },
-      assets: {},
+      assets: {}, folders: [],
     };
     const result = applyOperation(state, renameNote());
     expect(result).toEqual({ ok: false, error: 'TARGET_EXISTS' });
   });
 
   it('replaces note content', () => {
-    const state = { revision: 0, files: { 'notes/a.md': 'old' }, assets: {} };
+    const state = { revision: 0, files: { 'notes/a.md': 'old' }, assets: {}, folders: [] };
     const result = applyOperation(state, replaceContent());
     expect(result).toEqual({
       ok: true,
-      state: { revision: 1, files: { 'notes/a.md': 'updated' }, assets: {} },
+      state: { revision: 1, files: { 'notes/a.md': 'updated' }, assets: {}, folders: [] },
     });
   });
 
@@ -163,7 +166,7 @@ describe('applyOperation', () => {
     const result = applyOperation(createVaultState(), replaceContent());
     expect(result).toEqual({
       ok: true,
-      state: { revision: 1, files: { 'notes/a.md': 'updated' }, assets: {} },
+      state: { revision: 1, files: { 'notes/a.md': 'updated' }, assets: {}, folders: [] },
     });
   });
 });
@@ -181,7 +184,7 @@ describe('applyOperations', () => {
       deleteNote({ revision: 3, payload: { path: 'notes/b.md' } }),
     ];
     const result = applyOperations(state, operations);
-    expect(result).toEqual({ ok: true, state: { revision: 4, files: {}, assets: {} } });
+    expect(result).toEqual({ ok: true, state: { revision: 4, files: {}, assets: {}, folders: [] } });
   });
 
   it('applies duplicate creates as upserts', () => {
@@ -190,7 +193,7 @@ describe('applyOperations', () => {
     const result = applyOperations(state, operations);
     expect(result).toEqual({
       ok: true,
-      state: { revision: 2, files: { 'notes/a.md': 'hello' }, assets: {} },
+      state: { revision: 2, files: { 'notes/a.md': 'hello' }, assets: {}, folders: [] },
     });
   });
 
@@ -198,7 +201,7 @@ describe('applyOperations', () => {
     const state = createVaultState();
     const operations: Operation[] = [createNote(), createNote({ revision: 1 })];
     applyOperations(state, operations);
-    expect(state).toEqual({ revision: 0, files: {}, assets: {} });
+    expect(state).toEqual({ revision: 0, files: {}, assets: {}, folders: [] });
   });
 });
 
@@ -334,6 +337,167 @@ describe('rename-folder', () => {
     const result = applyOperation(
       stateWith({ 'archive/a.md': 'a' }),
       renameFolder({ oldPath: 'archive', newPath: 'x' })
+    );
+
+    expect(result.ok && result.state.revision).toBe(2);
+  });
+
+  it('carries empty folders in the subtree across', () => {
+    const state = {
+      ...createVaultState(),
+      revision: 1,
+      files: { 'archive/a.md': 'a' },
+      folders: ['archive/empty', 'archive/deep/empty', 'elsewhere/empty'],
+    };
+
+    const result = applyOperation(
+      state,
+      renameFolder({ oldPath: 'archive', newPath: 'archive-2024' })
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.folders.sort()).toEqual([
+      'archive-2024/deep/empty',
+      'archive-2024/empty',
+      'elsewhere/empty',
+    ]);
+  });
+
+  it('refuses a destination occupied by an empty folder', () => {
+    const state = {
+      ...createVaultState(),
+      revision: 1,
+      files: {},
+      folders: ['taken/empty'],
+    };
+
+    // The collision check has to read the folder list too, or this rename
+    // would silently discard a folder on every other device.
+    expect(
+      operationError(renameFolder({ oldPath: 'src', newPath: 'taken' }), state)
+    ).toBe('TARGET_EXISTS');
+  });
+});
+
+describe('create-folder', () => {
+  const createFolder = (
+    path: string,
+    revision = 1
+  ): CreateFolderOperation => ({
+    id: `op-create-folder-${path}`,
+    type: 'create-folder',
+    deviceId: 'dev-1',
+    revision,
+    payload: { path },
+  });
+
+  it('records a folder no file implies', () => {
+    const result = applyOperation(createVaultState(), createFolder('archive', 0));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.folders).toEqual(['archive']);
+    // The point of the whole feature: the folder now survives a snapshot.
+    expect(result.state.files).toEqual({});
+  });
+
+  it('is idempotent, so two devices racing do not fail the batch', () => {
+    const state = { ...createVaultState(), revision: 1, folders: ['archive'] };
+
+    expect(operationError(createFolder('archive'), state)).toBeNull();
+
+    const result = applyOperation(state, createFolder('archive'));
+    expect(result.ok && result.state.folders).toEqual(['archive']);
+  });
+
+  it('leaves the input state untouched', () => {
+    const state = createVaultState();
+
+    applyOperation(state, createFolder('archive'));
+
+    expect(state.folders).toEqual([]);
+  });
+});
+
+describe('delete-folder', () => {
+  const deleteFolder = (
+    path: string,
+    revision = 1
+  ): DeleteFolderOperation => ({
+    id: `op-delete-folder-${path}`,
+    type: 'delete-folder',
+    deviceId: 'dev-1',
+    revision,
+    payload: { path },
+  });
+
+  const stateWith = (
+    files: Record<string, string>,
+    folders: string[]
+  ): VaultState => ({
+    ...createVaultState(),
+    revision: 1,
+    files,
+    folders,
+  });
+
+  it('removes the folder', () => {
+    const result = applyOperation(
+      stateWith({}, ['archive', 'other']),
+      deleteFolder('archive')
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.folders).toEqual(['other']);
+  });
+
+  it('removes the empty folders nested inside it', () => {
+    const result = applyOperation(
+      stateWith({}, ['archive', 'archive/deep', 'archive/deep/empty', 'archive2']),
+      deleteFolder('archive')
+    );
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    // `archive2` shares a prefix with `archive` and must survive.
+    expect(result.state.folders).toEqual(['archive2']);
+  });
+
+  it('leaves files alone for the delete-note operations that follow', () => {
+    // Obsidian reports the folder and then every note inside it. Cascading
+    // over the notes here would leave the following `delete-note` addressing
+    // paths that no longer exist, which rejects the whole batch.
+    const state = stateWith({ 'archive/a.md': 'a' }, ['archive']);
+
+    const deleted = applyOperation(state, deleteFolder('archive'));
+    expect(deleted.ok).toBe(true);
+    if (!deleted.ok) return;
+    expect(deleted.state.files['archive/a.md']).toBe('a');
+
+    const note = applyOperation(
+      deleted.state,
+      deleteNote({ revision: 2, payload: { path: 'archive/a.md' } })
+    );
+    expect(note.ok).toBe(true);
+  });
+
+  it('is idempotent when the folder is already gone', () => {
+    const state = stateWith({ 'archive/a.md': 'a' }, []);
+
+    expect(operationError(deleteFolder('archive'), state)).toBeNull();
+
+    const result = applyOperation(state, deleteFolder('archive'));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.state.files['archive/a.md']).toBe('a');
+  });
+
+  it('advances the revision exactly once', () => {
+    const result = applyOperation(
+      stateWith({}, ['archive']),
+      deleteFolder('archive')
     );
 
     expect(result.ok && result.state.revision).toBe(2);

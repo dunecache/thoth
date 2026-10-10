@@ -398,7 +398,14 @@ export interface SnapshotAsset {
 
 /** Result of downloading a server snapshot. */
 export type SnapshotResult =
-  | { ok: true; revision: number; files: Record<string, string>; assets?: Record<string, SnapshotAsset> }
+  | {
+      ok: true;
+      revision: number;
+      files: Record<string, string>;
+      assets?: Record<string, SnapshotAsset>;
+      /** Folders no file implies. Absent from a server that predates them. */
+      folders?: string[];
+    }
   | ({ ok: false } & SyncFailure);
 
 /**
@@ -435,7 +442,17 @@ export async function downloadSnapshot(params: {
         typeof assetsRaw === 'object' && assetsRaw !== null && !Array.isArray(assetsRaw)
           ? (assetsRaw as Record<string, SnapshotAsset>)
           : undefined;
-      return { ok: true, revision, files, ...(assets ? { assets } : {}) };
+      const foldersRaw = (body as { folders?: unknown }).folders;
+      const folders = Array.isArray(foldersRaw)
+        ? foldersRaw.filter((p): p is string => typeof p === 'string')
+        : undefined;
+      return {
+        ok: true,
+        revision,
+        files,
+        ...(assets ? { assets } : {}),
+        ...(folders ? { folders } : {}),
+      };
     }
     return { ok: false, error: 'Snapshot response missing revision or files' };
   } catch (error) {

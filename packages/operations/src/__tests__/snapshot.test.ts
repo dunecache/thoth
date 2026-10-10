@@ -37,7 +37,7 @@ describe('snapshotFromLog', () => {
     const result = snapshotFromLog(second.log);
     expect(result).toEqual({
       ok: true,
-      state: { revision: 2, files: { 'notes/b.md': 'hello' }, assets: {} },
+      state: { revision: 2, files: { 'notes/b.md': 'hello' }, assets: {}, folders: [] },
     });
   });
 
@@ -94,9 +94,30 @@ describe('snapshotFromLog', () => {
 
 describe('serialize/deserialize snapshot', () => {
   it('round-trips a snapshot through JSON', () => {
-    const snapshot = { revision: 3, files: { 'a.md': 'hello', 'b.md': 'x' }, assets: {} };
+    const snapshot = { revision: 3, files: { 'a.md': 'hello', 'b.md': 'x' }, assets: {}, folders: [] };
     const restored = deserializeSnapshot(serializeSnapshot(snapshot));
     expect(restored).toEqual(snapshot);
+  });
+
+  it('round-trips the folders a vault would otherwise lose', () => {
+    const snapshot = {
+      revision: 1,
+      files: { 'a.md': 'hello' },
+      assets: {},
+      folders: ['archive/empty'],
+    };
+    const restored = deserializeSnapshot(serializeSnapshot(snapshot));
+    expect(restored.folders).toEqual(['archive/empty']);
+  });
+
+  it('defaults the folders a snapshot written before them lacks', () => {
+    // Such a snapshot exists on every vault already synced: the field was
+    // added after those were written, and rejecting them would strand the
+    // vault with no way forward.
+    const restored = deserializeSnapshot(
+      JSON.stringify({ revision: 4, files: { 'a.md': 'hello' } })
+    );
+    expect(restored.folders).toEqual([]);
   });
 
   it('throws a SyntaxError for malformed JSON', () => {

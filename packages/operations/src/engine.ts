@@ -83,9 +83,21 @@ export function operationError(
       // every other device.
       const collision =
         Object.keys(state.files).some((p) => isWithinFolder(p, newPath)) ||
-        Object.keys(state.assets).some((p) => isWithinFolder(p, newPath));
+        Object.keys(state.assets).some((p) => isWithinFolder(p, newPath)) ||
+        state.folders.some((p) => isWithinFolder(p, newPath));
       return collision ? 'TARGET_EXISTS' : null;
     }
+    case 'create-folder':
+      // Idempotent, like create-note. A folder that already exists is a
+      // no-op rather than an error: two devices racing to create the same
+      // folder is ordinary use, and failing the batch over it would be worse
+      // than the duplication it prevents.
+      return null;
+    case 'delete-folder':
+      // Idempotent for the same reason. An empty folder may be gone already
+      // because the last note in it was deleted on another device, which
+      // leaves nothing to report and must not reject the batch.
+      return null;
     case 'replace-content':
       return null;
     case 'insert-text':
@@ -111,6 +123,7 @@ export function applyOperation(state: VaultState, op: Operation): ApplyResult {
 
   const files = { ...state.files };
   const assets = { ...state.assets };
+  const folders = [...state.folders];
   switch (op.type) {
     case 'create-note':
       files[op.payload.path] = op.payload.content;
@@ -165,8 +178,38 @@ export function applyOperation(state: VaultState, op: Operation): ApplyResult {
           revision: nextRevision(state.revision),
           files: reparentEntries(files),
           assets: reparentAssets(assets),
+          folders: folders
+            .filter((path) => !isWithinFolder(path, oldPath))
+            .concat(
+              folders
+                .filter((path) => isWithinFolder(path, oldPath))
+                .map((path) => reparent(path, oldPath, newPath))
+            ),
         },
       };
+    }
+    case 'create-folder': {
+      // Recorded exactly as given. Ancestors are derivable from the path and
+      // are created by the receiving side, so synthesising them here would
+      // only add entries that duplicate what the path already says.
+      if (!folders.includes(op.payload.path)) {
+        folders.push(op.payload.path);
+      }
+      break;
+    }
+    case 'delete-folder': {
+      // Nested folders go with their parent, matching Obsidian: deleting a
+      // folder removes what is inside it. File and asset entries are left to
+      // the `delete-note`/`delete-asset` operations that Obsidian also reports
+      // for each descendant — cascading over them here would make those
+      // operations fail as `NOTE_NOT_FOUND` and take the batch down with them.
+      const { path } = op.payload;
+      for (let i = folders.length - 1; i >= 0; i -= 1) {
+        if (isWithinFolder(folders[i], path)) {
+          folders.splice(i, 1);
+        }
+      }
+      break;
     }
     case 'replace-content':
       files[op.payload.path] = op.payload.content;
@@ -204,7 +247,7 @@ export function applyOperation(state: VaultState, op: Operation): ApplyResult {
     }
   }
 
-  return { ok: true, state: { revision: nextRevision(state.revision), files, assets } };
+  return { ok: true, state: { revision: nextRevision(state.revision), files, assets, folders } };
 }
 
 /**

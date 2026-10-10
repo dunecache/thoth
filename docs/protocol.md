@@ -6,7 +6,7 @@ Thoth synchronizes via atomic operations, not whole files.
 
 - `Operation` – immutable, ordered by `revision`
   - `id: string` – stable ULID/UUID
-  - `type: 'create-note'|'delete-note'|'rename-note'|'replace-content'|'insert-text'|'delete-text'|'replace-range'|'add-asset'|'delete-asset'|'rename-folder'`
+  - `type: 'create-note'|'delete-note'|'rename-note'|'replace-content'|'insert-text'|'delete-text'|'replace-range'|'add-asset'|'delete-asset'|'rename-folder'|'create-folder'|'delete-folder'`
   - `deviceId: string`
   - `revision: number`
   - `parentRevision?: number`
@@ -20,6 +20,8 @@ Thoth synchronizes via atomic operations, not whole files.
 - `replace-content` – `{ path, content }`
 - `rename-note` – `{ oldPath, newPath }` — works for both text and binary, but only for files. A folder's own rename event is never emitted as this kind; see `rename-folder`
 - `rename-folder` – `{ oldPath, newPath }` — moves a whole folder subtree (files, assets and nested paths) in one operation, and removes the original folder
+- `create-folder` – `{ path }` — an explicitly created folder no file implies; ancestors are created by the receiver
+- `delete-folder` – `{ path }` — removes a folder and the empty folders inside it; files are removed by the accompanying `delete-note`/`delete-asset`
 - `delete-note` – `{ path }`
 - `insert-text` – `{ path, index, text }`
 - `delete-text` – `{ path, index, length }`
@@ -52,6 +54,20 @@ All requests validated with shared schemas in `@thoth/validation`.
 - Operations are applied deterministically
 - Log is append-only; snapshots are immutable
 - Conflicts returned as 409 with current server revision
+
+## Folder state
+
+A snapshot carries `folders: string[]` holding only folders that no file path
+implies — the ones a user created and expects to still find there, empty. A
+folder holding a note is derived from that note's path and is deliberately
+absent, because storing every folder duplicates data that can disagree with
+itself.
+
+`create-folder`, `delete-folder` and `rename-folder` are advertised through the
+`folders` capability. A client that has not seen it emits none of them, so
+deployment order does not matter: an older server never receives an operation
+it would reject, and a newer client against an older server degrades to the
+per-file behaviour it already had.
 
 ## Auth Wizard
 

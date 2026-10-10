@@ -268,6 +268,7 @@ export class VaultDurableObject {
         revision: data.snapshot.revision,
         files: data.snapshot.files,
         assets: (data.snapshot).assets ?? {},
+        folders: data.snapshot.folders ?? [],
       });
     }
 
@@ -282,12 +283,20 @@ export class VaultDurableObject {
       if (!parsed.ok) {
         return validationErrorResponse(parsed.issues);
       }
-      const snapshot = parsed.value as VaultState & { assets?: Record<string, unknown> };
+      const snapshot = parsed.value as VaultState & {
+        assets?: Record<string, unknown>;
+        folders?: string[];
+      };
       // Preserve revision monotonicity
       if (snapshot.revision < data.snapshot.revision) {
         return json({ error: 'BAD_REQUEST', message: 'snapshot revision cannot go backwards' }, 400);
       }
-      data.snapshot = { revision: snapshot.revision, files: snapshot.files, assets: (snapshot).assets ?? {} };
+      data.snapshot = {
+        revision: snapshot.revision,
+        files: snapshot.files,
+        assets: snapshot.assets ?? {},
+        folders: snapshot.folders ?? [],
+      };
       await this.save(data);
       return json({ ok: true, revision: data.snapshot.revision });
     }
@@ -753,6 +762,11 @@ export class VaultDurableObject {
       revision: data.snapshot.revision,
       operations: page,
       hasMore: page.length < available.length,
+      // Advertised here as well as on push because the client learns what the
+      // server accepts from the pull it performs before anything is queued.
+      // Without it on this response the gate never opens, and the operations
+      // it guards are never emitted at all.
+      capabilities: SERVER_CAPABILITIES,
       ...(lastReturned ? { nextRevision: lastReturned.revision + 1 } : {}),
     });
   }
@@ -1045,9 +1059,12 @@ export class VaultDurableObject {
       if (stored.log.baseRevision === undefined) {
         stored.log.baseRevision = 0;
       }
-      // Migrate old snapshots without assets field
+      // Migrate old snapshots written before these fields existed.
       if (!stored.snapshot.assets) {
         (stored.snapshot).assets = {};
+      }
+      if (!stored.snapshot.folders) {
+        (stored.snapshot).folders = [];
       }
       if (!stored.assets) {
         stored.assets = {};

@@ -19,9 +19,12 @@ export type ProtocolCapability =
   | 'idempotency'
   | 'version-negotiation'
   /**
-   * The server accepts `rename-folder`, which moves a folder subtree in one
-   * operation. Without it a client must emit the per-file renames Obsidian
-   * reports instead, which leaves the original folder behind everywhere else.
+   * The server accepts the folder operations and carries folder paths in the
+   * snapshot.
+   *
+   * Without it a client must emit the per-file renames Obsidian reports
+   * instead, which leaves the original folder behind everywhere else, and
+   * cannot represent an empty folder at all.
    */
   | 'folders';
 

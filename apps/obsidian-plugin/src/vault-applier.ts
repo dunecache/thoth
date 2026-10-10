@@ -14,10 +14,12 @@ export interface VaultAdapter {
   readBinary?(path: string): Promise<ArrayBuffer>;
   create(path: string, content: string): Promise<void>;
   createBinary?(path: string, data: ArrayBuffer): Promise<void>;
+  createFolder(path: string): Promise<void>;
   modify(file: { path: string }, content: string): Promise<void>;
   modifyBinary?(file: { path: string }, data: ArrayBuffer): Promise<void>;
   rename(file: { path: string }, newPath: string): Promise<void>;
   delete(path: string): Promise<void>;
+  deleteFolder(path: string): Promise<void>;
 }
 
 const BINARY_EXTENSIONS = new Set([
@@ -65,6 +67,23 @@ export function isBinaryPath(path: string): boolean {
   }
   const ext = path.slice(dot + 1).toLowerCase();
   return BINARY_EXTENSIONS.has(ext);
+}
+
+/**
+ * True when any segment of `path` is a dot-directory.
+ *
+ * Obsidian keeps its own state in `.obsidian` and deleted notes in `.trash`;
+ * a vault may also hold `.git`. None of it is user content, and copying it
+ * between devices is actively harmful — two devices writing the same config
+ * directory corrupt each other's plugin settings.
+ *
+ * Folder sync makes this its own concern. Files are already filtered by
+ * extension, but a folder has no extension to filter on, so `.obsidian`
+ * would otherwise be swept in wholesale: installing a plugin on one device
+ * would create an empty `.obsidian/plugins/<id>/` in every other vault.
+ */
+export function isHiddenPath(path: string): boolean {
+  return path.split('/').some((segment) => segment.startsWith('.'));
 }
 
 export function mimeTypeForPath(path: string): string | undefined {
@@ -285,6 +304,27 @@ export async function applyOperationToVault(
       }
       break;
     }
+    case 'create-folder': {
+      const { path } = operation.payload;
+      // Guarded rather than unconditional: the same folder can arrive twice
+      // when two devices create it at once, and Obsidian refuses to create a
+      // folder that is already there.
+      if (!(await vault.exists(path))) {
+        await vault.createFolder(path);
+      }
+      break;
+    }
+    case 'delete-folder': {
+      const { path } = operation.payload;
+      // Obsidian removes a folder's contents along with it, so the
+      // `delete-note` operations Obsidian also reported for each descendant
+      // find nothing left to do and are skipped by their own existence guard.
+      // The engine deliberately does not cascade for the same reason.
+      if (await vault.exists(path)) {
+        await vault.deleteFolder(path);
+      }
+      break;
+    }
     case 'insert-text': {
       const { path, index, text } = operation.payload;
       const exists = await vault.exists(path);
@@ -390,12 +430,18 @@ export async function applyOperationsToVault(
 }
 
 /**
- * Restores a vault from a snapshot by writing all files.
- * Existing files are overwritten with the snapshot content.
+ * Restores a vault from a snapshot by writing all files, then creating the
+ * folders the snapshot records.
+ *
+ * Existing files are overwritten with the snapshot content. Folders are
+ * written after the files so a path already implied by a note is skipped —
+ * the snapshot only lists folders no file implies, but a device may hold more
+ * than the server does.
  */
 export async function applySnapshotToVault(
   vault: VaultAdapter,
-  files: Record<string, string>
+  files: Record<string, string>,
+  folders: readonly string[] = []
 ): Promise<void> {
   for (const [path, content] of Object.entries(files)) {
     const exists = await vault.exists(path);
@@ -410,6 +456,11 @@ export async function applySnapshotToVault(
       await vault.modify({ path }, content);
     } else {
       await vault.create(path, content);
+    }
+  }
+  for (const path of folders) {
+    if (!(await vault.exists(path))) {
+      await vault.createFolder(path);
     }
   }
 }

@@ -69,6 +69,31 @@ describe('operationSchema', () => {
     expect(result.ok).toBe(true);
   });
 
+  it('accepts each folder operation with its path', () => {
+    for (const type of ['create-folder', 'delete-folder'] as const) {
+      const result = operationSchema({
+        ...validOperation,
+        type,
+        payload: { path: 'archive/empty' },
+      });
+      expect(result.ok).toBe(true);
+    }
+  });
+
+  it('rejects a folder operation with no path', () => {
+    const result = operationSchema({
+      ...validOperation,
+      type: 'create-folder',
+      payload: {},
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.issues).toEqual([
+        { path: 'payload.path', message: 'expected a string' },
+      ]);
+    }
+  });
+
   it('rejects an unknown operation type', () => {
     const result = operationSchema({ ...validOperation, type: 'explode' });
     expect(result.ok).toBe(false);
@@ -77,7 +102,7 @@ describe('operationSchema', () => {
         {
           path: 'type',
           message:
-            'expected one of: create-note, delete-note, rename-note, replace-content, insert-text, delete-text, replace-range, add-asset, delete-asset, rename-folder',
+            'expected one of: create-note, delete-note, rename-note, replace-content, insert-text, delete-text, replace-range, add-asset, delete-asset, rename-folder, create-folder, delete-folder',
         },
       ]);
     }
@@ -264,6 +289,39 @@ describe('snapshotSchema', () => {
         { path: 'files.a.md', message: 'expected a string' },
       ]);
     }
+  });
+
+  it('accepts a snapshot carrying folders', () => {
+    const result = snapshotSchema({
+      revision: 1,
+      files: {},
+      folders: ['archive/empty'],
+    });
+    expect(result.ok).toBe(true);
+  });
+
+  it('accepts a snapshot without folders, as written before they existed', () => {
+    // Every vault already synced has snapshots in this shape. Rejecting them
+    // would leave no way to read existing state at all.
+    expect(snapshotSchema({ revision: 4, files: {} }).ok).toBe(true);
+  });
+
+  it('rejects a non-string folder path', () => {
+    const result = snapshotSchema({
+      revision: 0,
+      files: {},
+      folders: ['archive', 7],
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  it('rejects an empty folder path', () => {
+    const result = snapshotSchema({
+      revision: 0,
+      files: {},
+      folders: [''],
+    });
+    expect(result.ok).toBe(false);
   });
 });
 

@@ -12,9 +12,10 @@ import type { Operation } from '@thoth/protocol';
 class MemVault {
   files = new Map<string, string>();
   binaries = new Map<string, ArrayBuffer>();
+  folders = new Set<string>();
 
   async exists(path: string): Promise<boolean> {
-    return this.files.has(path) || this.binaries.has(path);
+    return this.files.has(path) || this.binaries.has(path) || this.folders.has(path);
   }
   async read(path: string): Promise<string> {
     return this.files.get(path) ?? '';
@@ -27,6 +28,9 @@ class MemVault {
   }
   async createBinary(path: string, data: ArrayBuffer): Promise<void> {
     this.binaries.set(path, data);
+  }
+  async createFolder(path: string): Promise<void> {
+    this.folders.add(path);
   }
   async modify(file: { path: string }, content: string): Promise<void> {
     this.files.set(file.path, content);
@@ -49,6 +53,9 @@ class MemVault {
   async delete(path: string): Promise<void> {
     this.files.delete(path);
     this.binaries.delete(path);
+  }
+  async deleteFolder(path: string): Promise<void> {
+    this.folders.delete(path);
   }
 }
 

@@ -54,10 +54,15 @@ export function deserializeSnapshot(raw: string): VaultState {
   if (!result.ok) {
     throw new ValidationError(result.issues);
   }
-  // Normalize missing assets for backward compat
+  // Normalize fields a snapshot written by an older version may not carry.
+  // Both were absent from the schema once, so both are defaulted here rather
+  // than left undefined for every consumer to guard against.
   const value = result.value as VaultState;
   if (!value.assets) {
     value.assets = {};
+  }
+  if (!value.folders) {
+    value.folders = [];
   }
   return value;
 }

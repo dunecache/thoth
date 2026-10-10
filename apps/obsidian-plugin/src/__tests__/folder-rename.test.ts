@@ -97,7 +97,7 @@ describe('changeToDraft for a folder rename', () => {
 });
 
 describe('listener: folder rename emits one operation, not N', () => {
-  function setup(canRenameFolders: boolean) {
+  function setup(canSyncFolders: boolean) {
     const { vault, fire } = eventVault();
     const { queue, drafts } = fakeQueue();
     const pendingFolderRenames = new Set<string>();
@@ -107,7 +107,7 @@ describe('listener: folder rename emits one operation, not N', () => {
       getDeviceId: () => 'device-1',
       getExtensions: () => ['md'],
       pendingFolderRenames,
-      canRenameFolders: () => canRenameFolders,
+      canSyncFolders: () => canSyncFolders,
     });
     return { fire, drafts, pendingFolderRenames, detach };
   }

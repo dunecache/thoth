@@ -22,12 +22,19 @@ import { hashArrayBuffer } from './vault-applier.js';
 export interface ObsidianVault {
   getAbstractFileByPath(path: string): TAbstractFile | null;
   /**
-   * Used only to enumerate the subtree a folder rename moves. Optional so a
-   * caller that never renames a folder need not provide it; when absent the
-   * guard simply records fewer paths, which costs echo suppression rather
-   * than correctness.
+   * Used to enumerate the subtree a folder rename or delete moves. Optional
+   * so a caller that never touches a folder need not provide it; when absent
+   * the guard records fewer paths, which costs echo suppression rather than
+   * correctness.
    */
   getFiles?(): TAbstractFile[];
+  /**
+   * Used only to enumerate the empty folders inside a folder the applier
+   * deletes. Optional for the same reason as `getFiles`; when absent, the
+   * events for those folders echo back as redundant — but idempotent —
+   * `delete-folder` operations rather than causing a failure.
+   */
+  getAllFolders?(): TAbstractFile[];
   createFolder(path: string): Promise<unknown>;
   create(path: string, data: string): Promise<unknown>;
   createBinary(path: string, data: ArrayBuffer): Promise<unknown>;
@@ -59,9 +66,14 @@ export class VaultPathConflictError extends Error {
  * so anything that writes to a *new* path must create its parents first.
  * `rename` previously skipped this, which is why moving a note into a new
  * folder failed on the receiving device.
+ *
+ * Each folder created here is recorded with the guard: Obsidian reports each
+ * one, and an unrecorded create event looks like the user made that folder,
+ * so it would be queued and sent back to the server as a redundant operation.
  */
 async function ensureFolders(
   vault: ObsidianVault,
+  applyGuard: ApplyGuard,
   path: string
 ): Promise<void> {
   const parts = path.split('/');
@@ -71,6 +83,7 @@ async function ensureFolders(
     folderPath = folderPath ? `${folderPath}/${part}` : part;
     const existing = vault.getAbstractFileByPath(folderPath);
     if (!existing) {
+      applyGuard.recordPath(folderPath);
       await vault.createFolder(folderPath);
       continue;
     }
@@ -91,9 +104,48 @@ export function createObsidianVaultAdapter(
     const file = vault.getAbstractFileByPath(path);
     return file instanceof TFile ? file : null;
   };
+  // Every path under `root`, from both trees Obsidian can enumerate.
+  const subtreeOf = (root: string): string[] => {
+    const prefix = `${root}/`;
+    return [
+      ...(vault.getFiles?.() ?? []),
+      ...(vault.getAllFolders?.() ?? []),
+    ]
+      .map((f) => f.path)
+      .filter((path) => path.startsWith(prefix));
+  };
   return {
     exists: (path: string) =>
       Promise.resolve(vault.getAbstractFileByPath(path) !== null),
+    createFolder: async (path: string) => {
+      const existing = vault.getAbstractFileByPath(path);
+      if (existing) {
+        // Already there, which for the applier means the folder was created
+        // twice — two devices made it at once. Obsidian refuses to create over
+        // an existing path, and the desired state already holds. A file
+        // sitting there instead is left alone rather than raised: the engine
+        // models state, and it has no rule for a path that is both.
+        return;
+      }
+      await ensureFolders(vault, applyGuard, path);
+      applyGuard.recordPath(path);
+      await vault.createFolder(path);
+    },
+    deleteFolder: async (path: string) => {
+      const existing = vault.getAbstractFileByPath(path);
+      if (!(existing instanceof TFolder)) {
+        return;
+      }
+      // Deleting a folder deletes its contents, and Obsidian reports every
+      // path removed. Only the paths actually moved are recorded: a blanket
+      // prefix rule would swallow a genuine edit made in the same window.
+      const subtree = subtreeOf(path);
+      applyGuard.recordPath(path);
+      for (const moved of subtree) {
+        applyGuard.recordPath(moved);
+      }
+      await vault.delete(existing);
+    },
     read: async (path: string) => {
       const file = fileAt(path);
       if (!file) {
@@ -109,12 +161,12 @@ export function createObsidianVaultAdapter(
       return await vault.readBinary(file);
     },
     create: async (path: string, content: string) => {
-      await ensureFolders(vault, path);
+      await ensureFolders(vault, applyGuard, path);
       applyGuard.recordText(path, content);
       await vault.create(path, content);
     },
     createBinary: async (path: string, data: ArrayBuffer) => {
-      await ensureFolders(vault, path);
+      await ensureFolders(vault, applyGuard, path);
       applyGuard.recordBinary(path, await hashArrayBuffer(data));
       await vault.createBinary(path, data);
     },
@@ -140,7 +192,7 @@ export function createObsidianVaultAdapter(
       if (!existing) {
         return;
       }
-      await ensureFolders(vault, newPath);
+      await ensureFolders(vault, applyGuard, newPath);
       // A folder rename moves a subtree, and Obsidian raises a rename event
       // for the folder and for every descendant. Those descendants are
       // enumerated up front so the guard knows exactly which events to
@@ -148,11 +200,7 @@ export function createObsidianVaultAdapter(
       // same window. Only a folder needs this, so the scan is paid on a
       // rename rather than on every write.
       if (existing instanceof TFolder) {
-        const prefix = `${existing.path}/`;
-        const moved = (vault.getFiles?.() ?? [])
-          .map((f) => f.path)
-          .filter((path) => path.startsWith(prefix));
-        applyGuard.recordFolderRename(existing.path, newPath, moved);
+        applyGuard.recordFolderRename(existing.path, newPath, subtreeOf(existing.path));
       } else {
         applyGuard.recordPath(file.path);
       }

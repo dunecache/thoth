@@ -18,8 +18,18 @@ export interface VaultState {
   revision: Revision;
   files: Record<string, string>;
   assets: Record<string, AssetRecord>;
+  /**
+   * Folders whose existence no file path implies — the ones a user created
+   * and expects to still find there, empty.
+   *
+   * A folder holding files is derived from those paths and is deliberately
+   * absent here. Storing every folder would duplicate data that can disagree
+   * with itself: the same path in `files` and in `folders`, with no rule for
+   * which one wins once a note moves.
+   */
+  folders: string[];
 }
 
 export function createVaultState(): VaultState {
-  return { revision: 0, files: {}, assets: {} };
+  return { revision: 0, files: {}, assets: {}, folders: [] };
 }

@@ -232,6 +232,13 @@ describe('pull', () => {
       operations: [replaceContent(1, 'notes/a.md', 'edited')],
       hasMore: false,
       nextRevision: 2,
+      capabilities: [
+        'batching',
+        'partial-sync',
+        'granular-ops',
+        'idempotency',
+        'folders',
+      ],
     });
   });
 
@@ -246,6 +253,13 @@ describe('pull', () => {
       revision: 1,
       operations: [],
       hasMore: false,
+      capabilities: [
+        'batching',
+        'partial-sync',
+        'granular-ops',
+        'idempotency',
+        'folders',
+      ],
     });
   });
 

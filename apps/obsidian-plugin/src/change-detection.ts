@@ -15,7 +15,14 @@ export type FileChange =
    * standing empty on every other device, since nothing ever said they should
    * go away.
    */
-  | { kind: 'rename-folder'; oldPath: string; newPath: string };
+  | { kind: 'rename-folder'; oldPath: string; newPath: string }
+  /**
+   * A folder creation. Only emitted for folders the user made and no file
+   * implies; a folder that arrives holding a note is described by that note.
+   */
+  | { kind: 'create-folder'; path: string }
+  /** A folder deletion. */
+  | { kind: 'delete-folder'; path: string };
 
 /**
  * Maps a normalized file change to an operation draft. Pure and
@@ -46,6 +53,16 @@ export function changeToDraft(change: FileChange): OperationDraft {
     case 'delete':
       return {
         type: 'delete-note',
+        payload: { path: change.path },
+      };
+    case 'create-folder':
+      return {
+        type: 'create-folder',
+        payload: { path: change.path },
+      };
+    case 'delete-folder':
+      return {
+        type: 'delete-folder',
         payload: { path: change.path },
       };
   }

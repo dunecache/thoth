@@ -51,6 +51,7 @@ import {
   assetIdForPath,
   hashArrayBuffer,
   isBinaryPath,
+  isHiddenPath,
   MAX_ASSET_SIZE,
   mimeTypeForPath,
 } from './vault-applier.js';
@@ -269,7 +270,7 @@ export class ThothPlugin extends Plugin {
         isAppliedChange: (path, fingerprint) =>
           this.applyGuard.consume(path, fingerprint),
         pendingFolderRenames: this.pendingFolderRenames,
-        canRenameFolders: () => this.serverSupportsFolders,
+        canSyncFolders: () => this.serverSupportsFolders,
         onLocalChange: () => {
           if (
             this.settings.serverUrl &&
@@ -725,7 +726,7 @@ export class ThothPlugin extends Plugin {
       new Notice(`Thoth: export failed — ${snap.error}`);
       return;
     }
-    const content = JSON.stringify({ revision: snap.revision, files: snap.files, assets: snap.assets ?? {} }, null, 2);
+    const content = JSON.stringify({ revision: snap.revision, files: snap.files, assets: snap.assets ?? {}, folders: snap.folders ?? [] }, null, 2);
     const path = 'thoth-snapshot.json';
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing) await this.app.vault.delete(existing);
@@ -1138,6 +1139,7 @@ export class ThothPlugin extends Plugin {
       // empty" further down.
       let snapshotFiles: Record<string, string> = {};
       let snapshotAssets: Record<string, SnapshotAsset> = {};
+      let snapshotFolders: string[] = [];
       let haveAuthoritativeSnapshot = false;
       if (this.serverRevision === 0) {
         const restored = await this.restoreFromSnapshot(adapter);
@@ -1145,6 +1147,7 @@ export class ThothPlugin extends Plugin {
           haveAuthoritativeSnapshot = true;
           snapshotFiles = restored.files;
           snapshotAssets = restored.assets;
+          snapshotFolders = restored.folders;
         }
       }
 
@@ -1170,6 +1173,7 @@ export class ThothPlugin extends Plugin {
           await this.bootstrapLocalVault(
             snapshotFiles,
             snapshotAssets,
+            snapshotFolders,
             haveAuthoritativeSnapshot
           );
         }
@@ -1437,7 +1441,11 @@ export class ThothPlugin extends Plugin {
    */
   private async restoreFromSnapshot(
     adapter: VaultAdapter
-  ): Promise<{ files: Record<string, string>; assets: Record<string, SnapshotAsset> } | null> {
+  ): Promise<{
+    files: Record<string, string>;
+    assets: Record<string, SnapshotAsset>;
+    folders: string[];
+  } | null> {
     const { serverUrl, vaultId } = this.settings;
     if (!serverUrl || !vaultId) {
       return null;
@@ -1458,7 +1466,8 @@ export class ThothPlugin extends Plugin {
       return null;
     }
     const assets = snapshotResult.assets ?? {};
-    await applySnapshotToVault(adapter, snapshotResult.files);
+    const folders = snapshotResult.folders ?? [];
+    await applySnapshotToVault(adapter, snapshotResult.files, folders);
     for (const [path, meta] of Object.entries(assets)) {
       const assetRes = await downloadAsset({
         serverUrl,
@@ -1486,8 +1495,9 @@ export class ThothPlugin extends Plugin {
       revision: snapshotResult.revision,
       files: Object.keys(snapshotResult.files).length,
       assets: Object.keys(assets).length,
+      folders: folders.length,
     });
-    return { files: snapshotResult.files, assets };
+    return { files: snapshotResult.files, assets, folders };
   }
 
   /**
@@ -1501,6 +1511,7 @@ export class ThothPlugin extends Plugin {
   private async bootstrapLocalVault(
     serverFiles: Record<string, string>,
     serverAssets: Record<string, SnapshotAsset>,
+    serverFolders: readonly string[],
     haveAuthoritativeSnapshot: boolean
   ): Promise<void> {
     if (!this.settings.deviceId) {
@@ -1564,8 +1575,10 @@ export class ThothPlugin extends Plugin {
       deviceId: this.settings.deviceId,
       serverFiles,
       serverAssets,
+      serverFolders,
       assetIdForPath,
       localFiles,
+      localFolders: this.unrepresentedLocalFolders(syncedFiles),
     });
     if (!plan.ok) {
       console.debug('Thoth: bootstrap produced no drafts', { reason: plan.reason });
@@ -1580,6 +1593,39 @@ export class ThothPlugin extends Plugin {
         enqueued: plan.drafts.length,
       });
     }
+  }
+
+  /**
+   * Local folders that no synchronized note implies.
+   *
+   * A folder holding a note is described by that note's path on every device,
+   * so sending it would duplicate state that can disagree with itself. What
+   * remains is the folder the user made and left empty — the one thing a vault
+   * made of file paths cannot express.
+   *
+   * Enumerating every folder is a vault-wide scan, so this is called from the
+   * two paths that reconcile a whole vault against the server — bootstrap and
+   * an explicit rescan — and not at all until the server has advertised that
+   * it accepts folder operations.
+   */
+  private unrepresentedLocalFolders(syncedFiles: readonly TFile[]): string[] {
+    if (!this.serverSupportsFolders) {
+      return [];
+    }
+    const implied = new Set<string>();
+    for (const file of syncedFiles) {
+      const segments = file.path.split('/');
+      segments.pop();
+      let prefix = '';
+      for (const segment of segments) {
+        prefix = prefix ? `${prefix}/${segment}` : segment;
+        implied.add(prefix);
+      }
+    }
+    return this.app.vault
+      .getAllFolders()
+      .filter((folder) => !implied.has(folder.path) && !isHiddenPath(folder.path))
+      .map((folder) => folder.path);
   }
 
   async rescanVault(): Promise<void> {
@@ -1647,9 +1693,18 @@ export class ThothPlugin extends Plugin {
           }
         }
       }
+      const serverFolders = new Set(snap.folders ?? []);
+      for (const path of this.unrepresentedLocalFolders(syncedFiles)) {
+        if (queuedPaths.has(path) || serverFolders.has(path)) continue;
+        await this.queue.enqueue(
+          { type: 'create-folder', payload: { path } },
+          this.settings.deviceId
+        );
+        enqueued++;
+      }
       if (enqueued > 0) {
         await this.saveQueue(this.queue);
-        new Notice(`Thoth: rescan enqueued ${enqueued} file(s)`);
+        new Notice(`Thoth: rescan enqueued ${enqueued} change(s)`);
         void this.scheduler?.trigger();
       } else {
         new Notice('Thoth: rescan — nothing missing');

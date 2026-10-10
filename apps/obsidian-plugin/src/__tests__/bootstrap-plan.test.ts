@@ -12,8 +12,10 @@ function plan(
     deviceId: 'dev-1',
     serverFiles: {},
     serverAssets: {},
+    serverFolders: [],
     assetIdForPath: identityAssetId,
     localFiles: [],
+    localFolders: [],
     ...overrides,
   });
 }
